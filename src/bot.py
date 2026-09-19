@@ -14,6 +14,7 @@ from urllib.parse import quote
 import tempfile
 import re
 import json
+import asyncio
 import random
 import hashlib
 import struct
@@ -923,25 +924,33 @@ class GoodreadsBot:
         """Process a single update dict received from Telegram webhook.
         Returns True if processed, False otherwise.
         """
+        import asyncio
+        from telegram import Update as TGUpdate
+
         try:
-            import telegram
-            from telegram import Update as TGUpdate
-            # Convert raw dict to Update object
             update = TGUpdate.de_json(raw_update, self.app.bot)
-            # Process through the application's callback
             loop = None
             try:
-                import asyncio
                 loop = asyncio.get_event_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.app.process_update(update))
+
+            # run the update through the app — errors re-raised by error_handler
+            # are captured in the Future result; we check for them explicitly
+            coro = self.app.process_update(update)
+            future = asyncio.ensure_future(coro)
+            loop.run_until_complete(future)
+
+            # If the handler raised an exception, it will be set as the Future result
+            result = future.result()
+            if isinstance(result, Exception):
+                logger.error(f"Handler raised: {result}")
+                return False
             return True
+
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error processing update: {e}")
+            logger.error(f"Error processing update: {e}", exc_info=True)
             return False
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -949,14 +958,14 @@ class GoodreadsBot:
 
         python-telegram-bot automatically retries the polling loop after a
         transient NetworkError/TimedOut, so we log those briefly instead of
-        dumping a full traceback (which is what happened before, because no
-        error handler was registered).
+        dumping a full traceback.
         """
         err = context.error
         if isinstance(err, (NetworkError, TimedOut)):
-            logger.warning(f"🌐 Transient network error (auto-retrying): {err!r}")
+            logger.warning(f"Transient network error (auto-retrying): {err!r}")
             return
         logger.error("Unhandled exception while processing update:", exc_info=err)
+        raise err  # Re-raise so process_update() can return False
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send a message when /start is issued"""
@@ -1360,4 +1369,11 @@ def get_bot() -> GoodreadsBot:
     global _bot_instance
     if _bot_instance is None:
         _bot_instance = GoodreadsBot(TELEGRAM_BOT_TOKEN, webhook_mode=True)
+        # Application must be initialized before process_update() is called
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(_bot_instance.app.initialize())
     return _bot_instance
