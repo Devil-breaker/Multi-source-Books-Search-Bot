@@ -1,0 +1,14 @@
+.env
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.claude/
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db

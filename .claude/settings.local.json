@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(pip install *)",
+      "PowerShell(python -c \"from goodreads_bot_advanced import GoodreadsBot; from apify_scraper import ApifyGoodreadsScraper; from cover_downloader import CoverDownloader; print\\('✅ All bot modules imported successfully!'\\)\")",
+      "PowerShell(python goodreads_bot_advanced.py)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(Stop-Process *)"
+    ]
+  }
+}
