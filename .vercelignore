@@ -1,0 +1,47 @@
+# Keep the original polling bot for local/Docker use
+goodreads_bot_advanced.py
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Development files
+cover_downloader.py
+description_formatter.py
+goodreads_bot_restored.py
+*.md
+!VERCEL_DEPLOY.md
+!README.md
+
+# Plans
+PLAN.md
+
+# Local test scripts (not needed on Vercel)
+test_local.py
+setup_webhook.py
