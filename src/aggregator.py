@@ -442,19 +442,28 @@ class MultiSourceBookAggregator:
 
         Uses the storygraph-api package: pip install storygraph-api
         API docs: https://pypi.org/project/storygraph-api/
+
+        Note: storygraph-api uses underscores (storygraph_api, not storygraph).
         """
         try:
-            from storygraph import Storygraph
+            from storygraph_api import Book
 
-            sg = Storygraph()
-            if isbn:
-                result = sg.get_book(isbn=isbn)
-            else:
-                result = sg.search_books(query=f"{title} {author}".strip())
-                if result and len(result) > 0:
-                    result = result[0]
-                else:
-                    return 0.0, 0
+            book_client = Book()
+            query = f"{title} {author}".strip() if title or author else ""
+            results = book_client.search(query) if query else []
+
+            result = None
+            if results and isinstance(results, list) and len(results) > 0:
+                # Try to parse JSON from results
+                import json
+                try:
+                    parsed = json.loads(results[0])
+                    if isinstance(parsed, list) and len(parsed) > 0:
+                        result = parsed[0]
+                    elif isinstance(parsed, dict):
+                        result = parsed
+                except (json.JSONDecodeError, ValueError):
+                    pass
 
             if not result:
                 return 0.0, 0
