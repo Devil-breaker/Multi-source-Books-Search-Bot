@@ -44,6 +44,7 @@ class GoodreadsBot:
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(CommandHandler("help", self.help_command))
         self.app.add_handler(CommandHandler("search", self.search_command))
+        self.app.add_handler(CommandHandler("ping", self.ping_command))
         self.app.add_handler(CallbackQueryHandler(self.button_callback))
         self.app.add_error_handler(self.error_handler)
 
@@ -120,6 +121,7 @@ Use /help for more information.
 /start - Show welcome message
 /help - Show this help message
 /search &lt;query&gt; - Search for books
+/ping - Check if the bot is running
 
 <b>Features:</b>
 ✓ Searches multiple sources simultaneously
@@ -137,6 +139,10 @@ Use /help for more information.
             """.strip(),
             parse_mode=ParseMode.HTML,
         )
+
+    async def ping_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reply with bot status on /ping."""
+        await update.message.reply_text("✅ Bot is running and polling Telegram!")
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
