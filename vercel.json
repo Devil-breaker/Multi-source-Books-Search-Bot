@@ -6,6 +6,20 @@
       "use": "@vercel/python"
     }
   ],
+  "routes": [
+    {
+      "src": "/api/webhook",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/api/cron",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.py"
+    }
+  ],
   "crons": [
     {
       "path": "/api/cron",

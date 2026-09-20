@@ -81,3 +81,4 @@ test_description.py
 *.tmp
 *.temp
 .vercel
+.env*

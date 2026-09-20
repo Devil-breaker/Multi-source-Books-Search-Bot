@@ -123,18 +123,7 @@ git pull origin vercel
 vercel
 
 # Deploy to production
-vercel --prod
-```
-
-After the first deploy, set your Telegram webhook:
-
-```
-https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://your-project.vercel.app/api/webhook
-```
-
-To redeploy after code changes:
-
-```bash
+vercel 
 # On the vercel branch
 git pull origin vercel
 vercel --prod
