@@ -36,7 +36,8 @@ def handler(request):
     try:
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-        from src.bot import get_bot, MultiSourceBookAggregator
+        from src.handlers import get_bot
+        from src.aggregator import MultiSourceBookAggregator
 
         bot = get_bot()
 

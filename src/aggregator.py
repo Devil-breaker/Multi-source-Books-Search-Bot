@@ -1,0 +1,637 @@
+"""MultiSourceBookAggregator — aggregates book data from multiple sources."""
+
+import os
+import json
+import requests
+
+from src.utils import HEADERS, logger, is_placeholder_image, is_unreliable_gb_cover
+from src.search import scrape_goodreads
+
+# Google Books API key is optional; without it the API still works, just unauthenticated.
+GOOGLE_BOOKS_API_KEY = os.getenv("GOOGLE_BOOKS_API_KEY")
+
+
+class MultiSourceBookAggregator:
+    """Aggregates book data from multiple sources for best quality"""
+
+    @staticmethod
+    def search_google_books(query, limit=10):
+        """Search Google Books API"""
+        try:
+            logger.info(f"🔍 Searching Google Books: {query}")
+            url = "https://www.googleapis.com/books/v1/volumes"
+
+            params = {
+                "q": query,
+                "maxResults": min(limit, 40),
+                "printType": "books",
+                "orderBy": "relevance",
+                "langRestrict": "en",
+            }
+
+            if GOOGLE_BOOKS_API_KEY:
+                params["key"] = GOOGLE_BOOKS_API_KEY
+
+            response = requests.get(url, params=params, timeout=15)
+            if response.status_code != 200:
+                logger.warning(f"Google Books API error: {response.status_code}")
+                return []
+
+            data = response.json()
+            items = data.get("items", [])
+
+            books = []
+            for item in items:
+                book = MultiSourceBookAggregator._parse_google_book(item)
+                if book:
+                    books.append(book)
+
+            logger.info(f"✅ Google Books: found {len(books)} books")
+            return books
+
+        except Exception as e:
+            logger.error(f"Google Books error: {e}")
+            return []
+
+    @staticmethod
+    def _parse_google_book(item):
+        """Parse Google Books item"""
+        try:
+            vol = item.get("volumeInfo", {})
+            volume_id = item.get("id", "")
+
+            title = vol.get("title", "").strip()
+            if not title:
+                return None
+
+            authors = vol.get("authors", [])
+            author = authors[0] if authors else "Unknown Author"
+
+            # Get rating
+            rating = vol.get("averageRating", 0.0)
+            rating_count = vol.get("ratingsCount", 0)
+
+            # Get ISBN
+            isbn = ""
+            for id_obj in vol.get("industryIdentifiers", []):
+                if id_obj.get("type") in ["ISBN_13", "ISBN_10"]:
+                    isbn = id_obj.get("identifier", "")
+                    break
+
+            # Get cover (all sizes)
+            img = vol.get("imageLinks", {})
+            cover_url = (
+                img.get("extraLarge")
+                or img.get("large")
+                or img.get("medium")
+                or img.get("thumbnail")
+                or img.get("smallThumbnail", "")
+            )
+            if cover_url:
+                cover_url = cover_url.replace("http://", "https://").replace("&zoom=1", "&zoom=0")
+            # Catalog-only Google Books records (volume IDs ending in "AACAAJ")
+            # only ever return the "image not available" placeholder — treat them
+            # as having no cover so a real one is sourced later (Open Library/iTunes).
+            if is_unreliable_gb_cover(volume_id):
+                cover_url = ""
+            # Google Books "content" URLs are frequently the placeholder image;
+            # drop them here so a real cover is sourced later (iTunes → Hardcover
+            # → Open Library) when the user actually selects this book.
+            if cover_url and "books.googleapis.com/books/content?id=" in cover_url:
+                cover_url = ""
+
+            return {
+                "title": title,
+                "author": author,
+                "rating": rating,
+                "rating_count": rating_count,
+                "description": vol.get("description", ""),
+                "isbn": isbn,
+                "cover_url": cover_url,
+                "page_count": vol.get("pageCount", 0),
+                "published_date": vol.get("publishedDate", ""),
+                "categories": vol.get("categories", []),
+                "info_link": vol.get("infoLink", ""),
+                "gb_volume_id": volume_id,
+                "source": "google_books",
+                # Store raw volumeInfo for later enrichment
+                "_raw_volume_info": vol,
+            }
+        except Exception as e:
+            logger.debug(f"Error parsing Google book: {e}")
+            return None
+
+    @staticmethod
+    def search_itunes(query):
+        """Search iTunes API for high-quality covers"""
+        try:
+            logger.info(f"🔍 Searching iTunes: {query}")
+            url = "https://itunes.apple.com/search"
+            params = {
+                "term": query,
+                "media": "ebook",
+                "entity": "ebook",
+                "limit": 10,
+            }
+
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code != 200:
+                return []
+
+            data = response.json()
+            results = data.get("results", [])
+
+            books = []
+            for result in results:
+                book = MultiSourceBookAggregator._parse_itunes_book(result)
+                if book:
+                    books.append(book)
+
+            logger.info(f"✅ iTunes: found {len(books)} books")
+            return books
+
+        except Exception as e:
+            logger.error(f"iTunes error: {e}")
+            return []
+
+    @staticmethod
+    def _parse_itunes_book(result):
+        """Parse iTunes result"""
+        try:
+            title = result.get("trackName", "").strip()
+            if not title:
+                return None
+
+            author = result.get("artistName", "Unknown Author")
+
+            # Get highest quality artwork
+            artwork_url = result.get("artworkUrl100", "")
+            if artwork_url:
+                # Upgrade to maximum resolution
+                artwork_url = artwork_url.replace("100x100", "2048x2048")
+                artwork_url = artwork_url.replace("60x60", "2048x2048")
+
+            return {
+                "title": title,
+                "author": author,
+                "cover_url": artwork_url,
+                "description": result.get("description", ""),
+                "source": "itunes",
+            }
+        except Exception as e:
+            logger.debug(f"Error parsing iTunes book: {e}")
+            return None
+
+    @staticmethod
+    def aggregate_book_data(query, limit=10):
+        """
+        Aggregate book data from multiple sources and combine best information.
+
+        Strategy:
+        1. Search Google Books and iTunes in parallel
+        2. For each Google Books result, try to find a matching iTunes result for cover
+        3. Keep Google Books as primary source for description, categories, etc.
+        4. Ratings and genres will be fetched lazily from Hardcover/StoryGraph on selection.
+        """
+        logger.info(f"📚 Aggregating data from multiple sources for: {query}")
+
+        # Search all sources
+        google_books = MultiSourceBookAggregator.search_google_books(query, limit)
+        itunes_books = MultiSourceBookAggregator.search_itunes(query)
+
+        # If no results from any source – try Goodreads scraping as a last resort
+        if not google_books and not itunes_books:
+            logger.warning("No results from any source – trying Goodreads fallback")
+            gr_data = scrape_goodreads(query)
+            if gr_data:
+                book = {
+                    "title": gr_data.get("title", ""),
+                    "author": gr_data.get("author", ""),
+                    "rating": gr_data.get("rating", 0.0),
+                    "rating_count": gr_data.get("rating_count", 0),
+                    "description": gr_data.get("description", ""),
+                    "cover_url": gr_data.get("cover_url", ""),
+                    "isbn": gr_data.get("isbn", ""),
+                    "page_count": gr_data.get("page_count", 0),
+                    "published_date": str(gr_data.get("published_date", "")),
+                    "info_link": f"https://www.goodreads.com/search?q={requests.utils.quote(query)}",
+                    "source": "goodreads",
+                    "rating_formatted": f"{gr_data.get('rating', 0):.2f}" if gr_data.get("rating") else "N/A",
+                }
+                logger.info(f"✅ Goodreads fallback found: {book['title']}")
+                return [book]
+            logger.warning("No results from any source")
+            return []
+
+        # Use Google Books as primary source (best descriptions and metadata)
+        aggregated_books = []
+
+        for gb_book in google_books[:limit]:
+            # Start with Google Books data
+            book = gb_book.copy()
+
+            # Try to enhance with iTunes cover (higher quality) – only if confident match
+            itunes_match = MultiSourceBookAggregator._find_matching_book_strict(
+                book["title"], book["author"], itunes_books
+            )
+            if itunes_match and itunes_match.get("cover_url"):
+                logger.info(f"📸 Using iTunes cover for: {book['title']}")
+                book["cover_url"] = itunes_match["cover_url"]
+                book["cover_source"] = "itunes"
+            else:
+                book["cover_source"] = "google_books"
+
+            # Hide rating in search results; will be fetched lazily on selection
+            book["rating"] = 0.0
+            book["rating_count"] = 0
+            book["rating_formatted"] = "N/A"
+
+            aggregated_books.append(book)
+
+        # If Google Books had no results, use iTunes as primary
+        if not aggregated_books and itunes_books:
+            for itunes_book in itunes_books[:limit]:
+                book = itunes_book.copy()
+                book["cover_source"] = "itunes"
+
+                # Format rating
+                if book["rating"] > 0:
+                    book["rating_formatted"] = f"{book['rating']:.2f}"
+                else:
+                    book["rating_formatted"] = "N/A"
+                aggregated_books.append(book)
+
+        logger.info(f"✅ Aggregated {len(aggregated_books)} books with enhanced data")
+        return aggregated_books
+
+    @staticmethod
+    def _find_matching_book_strict(title, author, book_list):
+        """Find matching book in list by title/author similarity with stricter threshold."""
+        title_lower = title.lower()
+        author_lower = author.lower()
+
+        for book in book_list:
+            book_title = book.get("title", "").lower()
+            book_author = book.get("author", "").lower()
+
+            # Check if titles match (fuzzy) – require high similarity
+            if title_lower in book_title or book_title in title_lower or MultiSourceBookAggregator._similarity(
+                title_lower, book_title
+            ) > 0.8:
+                # Check if authors match – require high similarity
+                if author_lower in book_author or book_author in author_lower or MultiSourceBookAggregator._similarity(
+                    author_lower, book_author
+                ) > 0.8:
+                    return book
+
+        return None
+
+    @staticmethod
+    def _similarity(s1, s2):
+        """Enhanced string similarity that handles author name variations"""
+        import re
+
+        try:
+            # Normalize strings: lowercase, remove extra spaces
+            norm_s1 = re.sub(r"\s+", " ", s1.strip().lower())
+            norm_s2 = re.sub(r"\s+", " ", s2.strip().lower())
+
+            # Basic Jaccard similarity on words
+            words1 = set(norm_s1.split())
+            words2 = set(norm_s2.split())
+            intersection = words1.intersection(words2)
+            union = words1.union(words2)
+            jaccard_sim = len(intersection) / len(union) if union else 0
+
+            # Also check for substring containment (good for "J.R.R. Tolkien" in "J. R. R. Tolkien")
+            substr_sim = 0
+            if norm_s1 in norm_s2 or norm_s2 in norm_s1:
+                substr_sim = 1.0
+            # Also try without spaces around periods
+            norm_s1_no_spaces = norm_s1.replace(" ", "")
+            norm_s2_no_spaces = norm_s2.replace(" ", "")
+            if norm_s1_no_spaces in norm_s2_no_spaces or norm_s2_no_spaces in norm_s1_no_spaces:
+                substr_sim = 1.0
+
+            # Return the best match
+            return max(jaccard_sim, substr_sim)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _get_hardcover_data(isbn: str, title: str = "", author: str = "") -> tuple:
+        """Fetch book data from Hardcover.app GraphQL API.
+
+        Returns tuple: (rating, ratings_count, genres, image_url)
+        Uses search with query_type: 'Book' and selects the hit with highest ratings_count.
+        """
+        api_key = os.getenv("HARDCOVER_API_KEY", "").strip()
+        if not api_key:
+            return 0.0, 0, [], ""
+
+        try:
+            # Build search query - prefer title+author for accuracy
+            if title and author:
+                search_query = f"{title} {author}".strip()
+            elif title:
+                search_query = title.strip()
+            elif isbn:
+                search_query = isbn.replace("-", "").strip()
+            else:
+                return 0.0, 0, [], ""
+
+            if not search_query:
+                return 0.0, 0, [], ""
+
+            query = """
+            query SearchBooks($q: String!, $limit: Int) {
+                search(query: $q, query_type: "Book", per_page: $limit) {
+                    ids
+                    results
+                }
+            }
+            """
+            variables = {"q": search_query, "limit": 10}
+            resp = requests.post(
+                "https://api.hardcover.app/v1/graphql",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"query": query, "variables": variables},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                logger.debug(f"Hardcover GraphQL error {resp.status_code}: {resp.text[:200]}")
+                return 0.0, 0, [], ""
+
+            data = resp.json()
+            if "errors" in data:
+                logger.debug(f"Hardcover GraphQL errors: {data['errors']}")
+                return 0.0, 0, [], ""
+
+            search_result = data.get("data", {}).get("search", {})
+            raw_results = search_result.get("results", {})
+            # results is a JSONB object, may be string or dict
+            results_json = json.loads(raw_results) if isinstance(raw_results, str) else raw_results
+            hits = results_json.get("hits", [])
+
+            if not hits:
+                return 0.0, 0, [], ""
+
+            # Determine if we have title/author to filter by
+            title_lower = title.lower() if title else ""
+            author_lower = author.lower() if author else ""
+            have_title = bool(title_lower)
+            have_author = bool(author_lower)
+
+            # Helper to check if a hit matches the title/author
+            def _matches_title_author(doc):
+                doc_title = doc.get("title", "").lower()
+                doc_authors = doc.get("author_names", [])
+                if isinstance(doc_authors, list):
+                    doc_authors_str = " ".join(doc_authors).lower()
+                else:
+                    doc_authors_str = str(doc_authors).lower()
+
+                title_match = (not have_title) or (title_lower and title_lower in doc_title)
+                author_match = (not have_author) or (author_lower and author_lower in doc_authors_str)
+                return title_match and author_match
+
+            # First, try to find hits that match the title/author
+            if have_title or have_author:
+                filtered_hits = [h for h in hits if _matches_title_author(h.get("document", {}))]
+                if filtered_hits:
+                    best_hit = max(
+                        filtered_hits, key=lambda h: h.get("document", {}).get("ratings_count") or 0
+                    )
+                    logger.debug(f"Hardcover: selected from {len(filtered_hits)} title/author matches")
+                else:
+                    # Fallback to highest ratings_count among all hits if no title/author match
+                    best_hit = max(hits, key=lambda h: h.get("document", {}).get("ratings_count") or 0)
+                    logger.debug(
+                        f"Hardcover: no title/author match, falling back to highest ratings_count among {len(hits)} hits"
+                    )
+            else:
+                # No title/author to filter by, just take the highest ratings_count
+                best_hit = max(hits, key=lambda h: h.get("document", {}).get("ratings_count") or 0)
+                logger.debug(f"Hardcover: no title/author filter, selecting highest ratings_count among {len(hits)} hits")
+
+            doc = best_hit.get("document", {})
+
+            rating = doc.get("rating") or 0.0
+            ratings_count = doc.get("ratings_count") or 0
+            genres = doc.get("genres", []) or []
+            image_data = doc.get("image", {}) or {}
+            image_url = image_data.get("url", "")
+
+            if rating and ratings_count:
+                logger.info(f"⭐ Hardcover.app: {rating}/5 from {ratings_count} ratings for '{title or isbn}'")
+                return round(float(rating), 2), int(ratings_count), genres, image_url
+            else:
+                logger.debug(f"Hardcover hit has no rating: rating={rating}, count={ratings_count}")
+                return 0.0, 0, [], ""
+
+        except Exception as e:
+            logger.debug(f"Hardcover.app data lookup failed: {e}")
+            return 0.0, 0, [], ""
+
+    @staticmethod
+    def _get_storygraph_ratings(isbn: str, title: str = "", author: str = "") -> tuple:
+        """Fetch ratings from StoryGraph API.
+
+        Uses the storygraph-api package: pip install storygraph-api
+        API docs: https://pypi.org/project/storygraph-api/
+        """
+        try:
+            from storygraph import Storygraph
+
+            sg = Storygraph()
+            if isbn:
+                result = sg.get_book(isbn=isbn)
+            else:
+                result = sg.search_books(query=f"{title} {author}".strip())
+                if result and len(result) > 0:
+                    result = result[0]
+                else:
+                    return 0.0, 0
+
+            if not result:
+                return 0.0, 0
+
+            avg = result.get("rating") or result.get("avg_rating") or 0
+            count = result.get("rating_count") or result.get("num_ratings") or 0
+
+            if avg and count:
+                logger.info(f"⭐ StoryGraph: {avg}/5 from {count} ratings")
+                return round(float(avg), 2), int(count)
+        except ImportError:
+            logger.debug("storygraph-api not installed: pip install storygraph-api")
+        except Exception as e:
+            logger.debug(f"StoryGraph rating lookup failed: {e}")
+        return 0.0, 0
+
+    @staticmethod
+    def _ensure_ratings(book: dict) -> dict:
+        """Ensure book has ratings by fetching from Hardcover/StoryGraph if missing.
+
+        Args:
+            book: Dictionary with book data (must have 'title', 'author', optionally 'isbn')
+
+        Returns:
+            Updated book dictionary with ratings filled in if available
+        """
+        # If already has a rating, return as-is
+        if book.get("rating") and book.get("rating") > 0:
+            return book
+
+        # Try Hardcover first (cached to avoid repeat API calls)
+        hc_rating, hc_count, hc_genres, hc_cover = MultiSourceBookAggregator._get_hardcover_cached(
+            book.get("isbn", ""), book.get("title", ""), book.get("author", "")
+        )
+        if hc_rating > 0:
+            book["rating"] = hc_rating
+            book["rating_count"] = hc_count
+            book["rating_source"] = "hardcover"
+            book["rating_formatted"] = f"{hc_rating:.2f}"
+            # Store Hardcover genres and cover for later use
+            if hc_genres:
+                book["categories"] = hc_genres
+            if hc_cover and not book.get("cover_url"):
+                book["cover_url"] = hc_cover
+                book["cover_source"] = "hardcover"
+            return book
+
+        # Fallback to StoryGraph
+        sg_rating, sg_count = MultiSourceBookAggregator._get_storygraph_ratings(
+            book.get("isbn", ""), book.get("title", ""), book.get("author", "")
+        )
+        if sg_rating > 0:
+            book["rating"] = sg_rating
+            book["rating_count"] = sg_count
+            book["rating_source"] = "storygraph"
+            book["rating_formatted"] = f"{sg_rating:.2f}"
+
+        return book
+
+    @staticmethod
+    def _get_openlibrary_cover(isbn: str) -> str:
+        """Return a real Open Library cover URL for an ISBN, or '' if none.
+
+        Open Library's ``?default=false`` responds 404 when it has no cover, so
+        a 200 carrying a genuine (non-placeholder) image means success.
+        """
+        if not isbn:
+            return ""
+        clean = isbn.replace("-", "").strip()
+        if not clean:
+            return ""
+        check_url = f"https://covers.openlibrary.org/b/isbn/{clean}-L.jpg?default=false"
+        try:
+            r = requests.get(check_url, headers=HEADERS, timeout=10)
+            if r.status_code == 200 and len(r.content) > 3000 and not is_placeholder_image(r.content):
+                logger.info(f"🖼️ Open Library cover found for ISBN {clean}")
+                return f"https://covers.openlibrary.org/b/isbn/{clean}-L.jpg"
+        except Exception as e:
+            logger.debug(f"Open Library cover lookup failed: {e}")
+        return ""
+
+    @staticmethod
+    def _ensure_cover(book: dict) -> dict:
+        """Ensure the book has a real cover image.
+
+        Google Books placeholder covers are dropped during parsing, so this
+        fills a missing cover — priority: iTunes (high quality) → Hardcover → Open Library.
+        Called lazily when the user selects a book so searches stay fast.
+        """
+        if book.get("cover_url"):
+            return book  # already have a usable (non-placeholder) cover
+
+        # 1) iTunes by title/author (highest quality artwork)
+        try:
+            title = book.get("title", "")
+            author = book.get("author", "")
+            itunes = MultiSourceBookAggregator.search_itunes(f"{title} {author}".strip())
+            match = MultiSourceBookAggregator._find_matching_book_strict(title, author, itunes)
+            if match and match.get("cover_url"):
+                book["cover_url"] = match["cover_url"]
+                book["cover_source"] = "itunes"
+                logger.info(f"🖼️ iTunes cover found for: {title}")
+                return book
+        except Exception as e:
+            logger.debug(f"iTunes cover lookup failed: {e}")
+
+        # 2) Hardcover by title/author/isbn (good quality, community-driven)
+        try:
+            title = book.get("title", "")
+            author = book.get("author", "")
+            isbn = book.get("isbn", "")
+            _, _, _, hc_cover = MultiSourceBookAggregator._get_hardcover_data(isbn, title, author)
+            if hc_cover:
+                book["cover_url"] = hc_cover
+                book["cover_source"] = "hardcover"
+                logger.info(f"🖼️ Hardcover cover found for: {title}")
+                return book
+        except Exception as e:
+            logger.debug(f"Hardcover cover lookup failed: {e}")
+
+        # 3) Open Library by ISBN — reliable, 404s when it has no cover
+        ol = MultiSourceBookAggregator._get_openlibrary_cover(book.get("isbn", ""))
+        if ol:
+            book["cover_url"] = ol
+            book["cover_source"] = "open_library"
+            logger.info(f"🖼️ Open Library cover found for ISBN {book.get('isbn', '')}")
+            return book
+
+        return book
+
+    # ── Hardcover rating cache ─────────────────────────────────────────────────
+    # Simple in-memory cache so repeated lookups for the same book don't waste API calls.
+    # Key = (norm_isbn, norm_title, norm_author), Value = (rating, count, genres, cover_url)
+    _hc_cache: dict = {}
+
+    @staticmethod
+    def _get_hardcover_cached(isbn: str, title: str, author: str) -> tuple:
+        """Cached wrapper around _get_hardcover_data.
+
+        Cache is keyed by (isbn, title, author) so the same book looked up
+        multiple times (e.g. same ISBN in GB + iTunes results) hits cache.
+        """
+        norm = (
+            isbn.replace("-", "").strip().lower() if isbn else "",
+            title.strip().lower() if title else "",
+            author.strip().lower() if author else "",
+        )
+        if norm in MultiSourceBookAggregator._hc_cache:
+            logger.debug(f"🔁 Hardcover cache hit: {title or isbn}")
+            return MultiSourceBookAggregator._hc_cache[norm]
+
+        result = MultiSourceBookAggregator._get_hardcover_data(isbn, title, author)
+
+        # Cap cache size to bound memory usage (drop oldest entries)
+        if len(MultiSourceBookAggregator._hc_cache) >= 512:
+            for old_key in list(MultiSourceBookAggregator._hc_cache.keys())[:64]:
+                MultiSourceBookAggregator._hc_cache.pop(old_key, None)
+
+        MultiSourceBookAggregator._hc_cache[norm] = result
+        return result
+
+    @staticmethod
+    def _flush_hc_cache():
+        """Clear the Hardcover cache (call at start of new day or manually)."""
+        MultiSourceBookAggregator._hc_cache.clear()
+
+    # ── Hardcover cover fallback ─────────────────────────────────────────────
+    @staticmethod
+    def _get_hardcover_cover(isbn: str = "", title: str = "", author: str = "") -> str:
+        """Fetch cover image URL from Hardcover.app as a fallback.
+
+        Delegates to the cached unified lookup (_get_hardcover_data) so it shares
+        the same single API call as ratings/genres. Returns a URL or ''.
+        """
+        try:
+            _, _, _, cover_url = MultiSourceBookAggregator._get_hardcover_cached(isbn, title, author)
+            return cover_url or ""
+        except Exception as e:
+            logger.debug(f"Hardcover cover lookup error: {e}")
+            return ""

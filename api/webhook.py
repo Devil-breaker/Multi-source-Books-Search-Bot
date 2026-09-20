@@ -23,7 +23,7 @@ def handler(request):
     import sys
     import os as osmod
     sys.path.insert(0, osmod.path.join(osmod.path.dirname(__file__), '..'))
-    from src.bot import get_bot
+    from src.handlers import get_bot
 
     bot = get_bot()
     bot.process_update(raw_update)
