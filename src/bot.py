@@ -1063,9 +1063,13 @@ Use /help for more information.
         desc = re.sub(r'<[^>]+>', '', desc)
         desc = re.sub(r'\s+', ' ', desc).strip()
 
-        # Truncate to ~800 chars to stay within limits
+        # Truncate to ~800 chars to stay within limits, at a word boundary
         if len(desc) > 800:
-            desc = desc[:800] + '...'
+            cutoff = desc.rfind(' ', 0, 800)
+            if cutoff > 100:
+                desc = desc[:cutoff] + '...'
+            else:
+                desc = desc[:800] + '...'
 
         desc_escaped = html_escape(desc)
 
@@ -1211,8 +1215,12 @@ Use /help for more information.
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 results_text = f"📚 <b>Found {len(books)} results</b>\n\nSelect a book:"
 
-                await query.edit_message_caption(
-                    caption=results_text,
+                # Delete the current message (could be a photo or text) and send
+                # a clean, fresh text-only message with the results list.
+                await query.delete_message()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=results_text,
                     reply_markup=reply_markup,
                     parse_mode=ParseMode.HTML
                 )
@@ -1286,6 +1294,16 @@ Use /help for more information.
             book = MultiSourceBookAggregator._ensure_cover(book)
 
             text_info = self.format_book_message(book)
+
+            # Truncate caption to stay within Telegram's 1024 character limit
+            # for photo captions. Find a clean word boundary before truncating.
+            MAX_CAPTION = 950
+            if len(text_info) > MAX_CAPTION:
+                cutoff = text_info.rfind(' ', 0, MAX_CAPTION)
+                if cutoff > 0:
+                    text_info = text_info[:cutoff] + '...\n\n<i>📚 Full details at the link above</i>'
+                else:
+                    text_info = text_info[:MAX_CAPTION] + '...\n\n<i>📚 Full details at the link above</i>'
 
             await query.delete_message()
 
