@@ -1,15 +1,25 @@
 # 📚 Multi-Source Books Search Bot
 
-A Telegram bot that searches for books across multiple sources (Google Books, iTunes, Hardcover.app, StoryGraph) and delivers rich results including covers, ratings, descriptions, and metadata — all in your chat.
+A Telegram bot that searches for books across multiple sources (Google Books, Hardcover.app, OpenLibrary) and delivers rich results including covers, ratings, descriptions, and metadata — all in your chat.
 
-## ✨ Features
+## 🏗️ Architecture
 
-- **Multi-source search** — queries Google Books, iTunes, Hardcover.app, and StoryGraph simultaneously
-- **High-resolution covers** — fetches cover art from iTunes
-- **Rich book details** — ratings, reviews, ISBN, page count, publication year, genres, descriptions
-- **Cover downloads** — send book covers directly to your chat
-- **Rating aggregation** — community ratings from Hardcover.app and StoryGraph
-- **Direct links** — inline links to Google Books and Goodreads
+The bot uses a **modular structure** with a single source of truth in `src/handlers.py`. All entry points (polling, Docker, or Vercel webhook) import from the same shared code, so fixes apply everywhere automatically.
+
+```
+src/
+├── handlers.py    # GoodreadsBot class — bot logic, commands, UI (single source of truth)
+├── aggregator.py  # MultiSourceBookAggregator — Google Books, Hardcover, OpenLibrary
+├── search.py      # Search helpers, Goodreads URL builder
+└── utils.py       # Logger, HTTP headers, HTML utilities
+```
+
+**Two deployment modes:**
+
+| Mode | Entry point | How it runs |
+|---|---|---|
+| Polling | `goodreads_bot.py` | Long-polls Telegram via python-telegram-bot |
+| Vercel Webhook | `api/webhook.py` | Vercel receives HTTPS POST from Telegram |
 
 ## 🤖 Bot Commands
 
@@ -19,16 +29,11 @@ A Telegram bot that searches for books across multiple sources (Google Books, iT
 | `/help` | Show help and usage guide |
 | `/search <query>` | Search for books by title, author, or ISBN |
 
-## 🚀 Setup
+## 🚀 Deployment
 
-### Prerequisites
+### Option 1 — Polling (local / VPS / Docker)
 
-- Python 3.9+
-- A Telegram Bot Token from [@BotFather](https://t.me/BotFather)
-- (Optional) [Google Books API Key](https://console.cloud.google.com/apis/library/books.googleapis.com) for richer metadata
-- (Optional) [Hardcover.app API Key](https://hardcover.app/settings/api) for community ratings
-
-### Installation
+**Prerequisites:** Python 3.12+
 
 ```bash
 # Clone the repository
@@ -50,36 +55,136 @@ GOOGLE_BOOKS_API_KEY=your_google_books_api_key_here
 HARDCOVER_API_KEY=your_hardcover_api_key_here
 ```
 
-### Run
+**Run:**
 
 ```bash
-python goodreads_bot_advanced.py
+py -3.12 goodreads_bot.py
 ```
 
-### Run with Docker
+**Run with Docker:**
 
 ```bash
 docker build -t books-bot .
 docker run --env-file .env books-bot
 ```
 
+---
+
+### Option 2 — Vercel Webhook (RECOMMENDED)
+
+The bot runs as a serverless Vercel Python function. Telegram sends updates via HTTPS webhook — no long-running process, no uptime cost, free tier friendly.
+
+#### Before deploying (one-time Telegram setup)
+
+Set your bot's webhook to point at Vercel:
+
+```
+https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://your-project.vercel.app/api/webhook
+```
+
+Or use the helper script:
+
+```bash
+py -3.12 setup_webhook.py
+```
+
+#### Deploy via Vercel Dashboard
+
+1. Go to [vercel.com](https://vercel.com) and sign in
+2. Click **Add New → Project**
+3. Import your GitHub repository (`Devil-breaker/Multi-source-Books-Search-Bot`)
+4. In **Framework Preset**, select **Python** (or leave as Other)
+5. Leave **Build Command** and **Output Directory** at their defaults (no build command needed for Python)
+6. Click **Environment Variables** and add:
+   - `TELEGRAM_BOT_TOKEN` — your Telegram bot token
+   - `GOOGLE_BOOKS_API_KEY` — *(optional)*
+   - `HARDCOVER_API_KEY` — *(optional)*
+   - `WEBHOOK_SECRET` — *(optional, but recommended)* a random secret string to verify incoming webhook requests
+7. Click **Deploy**
+
+After the first deploy, set your Telegram bot's webhook URL (see "Before deploying" above), substituting `your-project.vercel.app` with your actual Vercel deployment URL.
+
+#### Deploy via Vercel CLI
+
+```bash
+# Install Vercel CLI
+npm install -g vercel
+
+# Login (opens browser)
+vercel login
+
+# Go to the vercel branch (has api/ webhook files)
+git checkout vercel
+
+# Pull the latest remote changes
+git pull origin vercel
+
+# Deploy to preview
+vercel
+
+# Deploy to production
+vercel --prod
+```
+
+After the first deploy, set your Telegram webhook:
+
+```
+https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://your-project.vercel.app/api/webhook
+```
+
+To redeploy after code changes:
+
+```bash
+# On the vercel branch
+git pull origin vercel
+vercel --prod
+```
+
+#### Vercel environment variables (CLI)
+
+```bash
+# Add each variable
+vercel env add TELEGRAM_BOT_TOKEN
+vercel env add GOOGLE_BOOKS_API_KEY
+vercel env add HARDCOVER_API_KEY
+vercel env add WEBHOOK_SECRET    # optional but recommended
+
+# After adding variables, redeploy to apply them
+vercel --prod
+```
+
+#### Cron job (keep-warm heartbeat)
+
+`api/cron.py` runs every 10 minutes (configured in `vercel.json`) to flush the Hardcover API cache and prevent cold starts. The Vercel Cron Job is enabled automatically from `vercel.json`. If not, add it manually under **Storage → Cron Jobs** in your Vercel dashboard.
+
+---
+
 ## 📁 Project Structure
 
 ```
 .
-├── goodreads_bot_advanced.py   # Main bot (all-in-one)
-├── requirements.txt            # Python dependencies
-├── Dockerfile                  # Docker image
-├── .env                        # Environment variables (git-ignored)
-├── env.example                 # Environment template
-└── .gitignore                  # Git ignore rules
+├── goodreads_bot.py           # Polling entry point (imports src/handlers.py)
+├── goodreads_bot_advanced.py  # Legacy all-in-one (kept for reference)
+├── src/
+│   ├── handlers.py            # GoodreadsBot class — single source of truth
+│   ├── aggregator.py          # MultiSourceBookAggregator
+│   ├── search.py              # Search helpers + Goodreads URL builder
+│   └── utils.py               # Logger, HEADERS, HTML utilities
+├── api/
+│   ├── webhook.py             # Vercel webhook entry point
+│   └── cron.py                # Vercel cron job (keep-warm + cache flush)
+├── vercel.json                # Vercel config (builds, crons, CORS headers)
+├── requirements.txt           # Python dependencies
+├── Dockerfile                 # Docker image (Python 3.12)
+├── env.example                # Environment variable template
+└── .gitignore                 # Git ignore rules (.env, __pycache__, .claude/, etc.)
 ```
 
 ## 🛠️ Dependencies
 
-- [python-telegram-bot](https://python-telegram-bot.org/) — Telegram Bot API
+- [python-telegram-bot](https://python-telegram-bot.org/) v21.1 — Telegram Bot API
 - [requests](https://docs.python-requests.org/) — HTTP client
 - [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) — HTML parsing
 - [python-dotenv](https://pypi.org/project/python-dotenv/) — .env support
 - [lxml](https://lxml.de/) — XML/HTML parser
-- [storygraph-api](https://pypi.org/project/storygraph-api/) — StoryGraph ratings
+- [storygraph-api](https://pypi.org/project/storygraph-api/) — StoryGraph ratings *(optional)*
