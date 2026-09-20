@@ -532,6 +532,11 @@ Use /help for more information.
         logger.info("=" * 80)
         logger.info("🚀 Starting Multi-Source Book Bot")
         logger.info("=" * 80)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         self.app.run_polling()
 
 
