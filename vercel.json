@@ -2,22 +2,8 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/**/*.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/webhook",
-      "dest": "/api/webhook.py"
-    },
-    {
-      "src": "/api/cron",
-      "dest": "/api/cron.py"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/api/index.py"
     }
   ],
   "crons": [
