@@ -70,9 +70,9 @@ docker run --env-file .env books-bot
 
 ---
 
-### Option 2 — Vercel Webhook (RECOMMENDED)
+### Option 2 — Vercel Webhook
 
-The bot runs as a serverless Vercel Python function. Telegram sends updates via HTTPS webhook — no long-running process, no uptime cost, free tier friendly.
+The bot runs as a serverless Vercel Python function. Telegram sends updates via HTTPS webhook — no long-running process needed.
 
 #### Before deploying (one-time Telegram setup)
 
@@ -82,7 +82,7 @@ Set your bot's webhook to point at Vercel:
 https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=https://your-project.vercel.app/api/webhook
 ```
 
-Or use the helper script:
+Or use the helper script (from the `vercel` branch):
 
 ```bash
 py -3.12 setup_webhook.py
@@ -94,7 +94,7 @@ py -3.12 setup_webhook.py
 2. Click **Add New → Project**
 3. Import your GitHub repository (`Devil-breaker/Multi-source-Books-Search-Bot`)
 4. In **Framework Preset**, select **Python** (or leave as Other)
-5. Leave **Build Command** and **Output Directory** at their defaults (no build command needed for Python)
+5. Under **Build and Output Settings**, leave both fields at default (no build command needed for Python)
 6. Click **Environment Variables** and add:
    - `TELEGRAM_BOT_TOKEN` — your Telegram bot token
    - `GOOGLE_BOOKS_API_KEY` — *(optional)*
@@ -155,7 +155,7 @@ vercel --prod
 
 #### Cron job (keep-warm heartbeat)
 
-`api/cron.py` runs every 10 minutes (configured in `vercel.json`) to flush the Hardcover API cache and prevent cold starts. The Vercel Cron Job is enabled automatically from `vercel.json`. If not, add it manually under **Storage → Cron Jobs** in your Vercel dashboard.
+`api/cron.py` runs every 10 minutes (configured in `vercel.json`) to flush the Hardcover API cache and prevent cold starts. The Vercel Cron Job should be automatically enabled from `vercel.json`. If not, add it manually under **Storage → Cron Jobs** in your Vercel dashboard.
 
 ---
 

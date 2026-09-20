@@ -6,9 +6,23 @@
       "use": "@vercel/python"
     }
   ],
+  "routes": [
+    {
+      "src": "/api/webhook",
+      "dest": "/api/webhook.py"
+    },
+    {
+      "src": "/api/cron",
+      "dest": "/api/cron.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.py"
+    }
+  ],
   "crons": [
     {
-      "path": "api/cron.py",
+      "path": "/api/cron",
       "schedule": "*/10 * * * *"
     }
   ],

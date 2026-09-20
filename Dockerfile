@@ -1,5 +1,5 @@
 # Use Python 3.11 slim image
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Prevent Python from writing .pyc files and enable unbuffered logging
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -17,9 +17,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy bot source code
-COPY goodreads_bot_advanced.py .
-COPY cover_downloader.py .
-COPY description_formatter.py .
+COPY goodreads_bot.py .
+COPY src/ src/
 
 # Run the Telegram bot
-CMD ["python", "goodreads_bot_advanced.py"]
+CMD ["python", "goodreads_bot.py"]
