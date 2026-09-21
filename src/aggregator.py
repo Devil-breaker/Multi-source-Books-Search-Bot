@@ -1,5 +1,6 @@
 """MultiSourceBookAggregator — aggregates book data from multiple sources."""
 
+import asyncio
 import os
 import json
 import requests
@@ -114,8 +115,6 @@ class MultiSourceBookAggregator:
                 "info_link": vol.get("infoLink", ""),
                 "gb_volume_id": volume_id,
                 "source": "google_books",
-                # Store raw volumeInfo for later enrichment
-                "_raw_volume_info": vol,
             }
         except Exception as e:
             logger.debug(f"Error parsing Google book: {e}")
@@ -183,26 +182,33 @@ class MultiSourceBookAggregator:
             return None
 
     @staticmethod
-    def aggregate_book_data(query, limit=10):
+    async def aggregate_book_data(query, limit=10):
         """
         Aggregate book data from multiple sources and combine best information.
 
         Strategy:
-        1. Search Google Books and iTunes in parallel
+        1. Search Google Books and iTunes concurrently
         2. For each Google Books result, try to find a matching iTunes result for cover
         3. Keep Google Books as primary source for description, categories, etc.
         4. Ratings and genres will be fetched lazily from Hardcover/StoryGraph on selection.
         """
         logger.info(f"📚 Aggregating data from multiple sources for: {query}")
 
-        # Search all sources
-        google_books = MultiSourceBookAggregator.search_google_books(query, limit)
-        itunes_books = MultiSourceBookAggregator.search_itunes(query)
+        # Run independent searches concurrently (both are pure I/O)
+        google_task = asyncio.to_thread(
+            MultiSourceBookAggregator.search_google_books, query, limit
+        )
+        itunes_task = asyncio.to_thread(
+            MultiSourceBookAggregator.search_itunes, query
+        )
+        google_books, itunes_books = await asyncio.gather(
+            google_task, itunes_task
+        )
 
         # If no results from any source – try Goodreads scraping as a last resort
         if not google_books and not itunes_books:
             logger.warning("No results from any source – trying Goodreads fallback")
-            gr_data = scrape_goodreads(query)
+            gr_data = await asyncio.to_thread(scrape_goodreads, query)
             if gr_data:
                 book = {
                     "title": gr_data.get("title", ""),
@@ -481,18 +487,19 @@ class MultiSourceBookAggregator:
         return 0.0, 0
 
     @staticmethod
-    def _ensure_ratings(book: dict) -> dict:
+    def _ensure_ratings(book: dict) -> tuple:
         """Ensure book has ratings by fetching from Hardcover/StoryGraph if missing.
 
-        Args:
-            book: Dictionary with book data (must have 'title', 'author', optionally 'isbn')
-
         Returns:
-            Updated book dictionary with ratings filled in if available
+            Tuple of (updated_book, hc_data_tuple) so callers like _ensure_cover
+            can reuse the cached Hardcover result without a redundant API call.
         """
-        # If already has a rating, return as-is
-        if book.get("rating") and book.get("rating") > 0:
-            return book
+        # If already has a rating, still fetch hc_data for _ensure_cover reuse
+        if book.get("rating") and book["rating"] > 0:
+            hc_data = MultiSourceBookAggregator._get_hardcover_cached(
+                book.get("isbn", ""), book.get("title", ""), book.get("author", "")
+            )
+            return book, hc_data
 
         # Try Hardcover first (cached to avoid repeat API calls)
         hc_rating, hc_count, hc_genres, hc_cover = MultiSourceBookAggregator._get_hardcover_cached(
@@ -509,7 +516,7 @@ class MultiSourceBookAggregator:
             if hc_cover and not book.get("cover_url"):
                 book["cover_url"] = hc_cover
                 book["cover_source"] = "hardcover"
-            return book
+            return book, (hc_rating, hc_count, hc_genres, hc_cover)
 
         # Fallback to StoryGraph
         sg_rating, sg_count = MultiSourceBookAggregator._get_storygraph_ratings(
@@ -521,7 +528,7 @@ class MultiSourceBookAggregator:
             book["rating_source"] = "storygraph"
             book["rating_formatted"] = f"{sg_rating:.2f}"
 
-        return book
+        return book, (hc_rating, hc_count, hc_genres, hc_cover)
 
     @staticmethod
     def _get_openlibrary_cover(isbn: str) -> str:
@@ -546,12 +553,17 @@ class MultiSourceBookAggregator:
         return ""
 
     @staticmethod
-    def _ensure_cover(book: dict) -> dict:
+    def _ensure_cover(book: dict, hc_data: tuple = None) -> dict:
         """Ensure the book has a real cover image.
 
         Google Books placeholder covers are dropped during parsing, so this
         fills a missing cover — priority: iTunes (high quality) → Hardcover → Open Library.
         Called lazily when the user selects a book so searches stay fast.
+
+        Args:
+            book: Book dictionary.
+            hc_data: Optional cached Hardcover result from _ensure_ratings
+                     to avoid a redundant API call.
         """
         if book.get("cover_url"):
             return book  # already have a usable (non-placeholder) cover
@@ -571,11 +583,15 @@ class MultiSourceBookAggregator:
             logger.debug(f"iTunes cover lookup failed: {e}")
 
         # 2) Hardcover by title/author/isbn (good quality, community-driven)
+        #    Reuse cached data from _ensure_ratings when available.
         try:
             title = book.get("title", "")
             author = book.get("author", "")
             isbn = book.get("isbn", "")
-            _, _, _, hc_cover = MultiSourceBookAggregator._get_hardcover_data(isbn, title, author)
+            if hc_data is not None:
+                _, _, _, hc_cover = hc_data
+            else:
+                _, _, _, hc_cover = MultiSourceBookAggregator._get_hardcover_cached(isbn, title, author)
             if hc_cover:
                 book["cover_url"] = hc_cover
                 book["cover_source"] = "hardcover"
@@ -595,39 +611,48 @@ class MultiSourceBookAggregator:
         return book
 
     # ── Hardcover rating cache ─────────────────────────────────────────────────
-    # Simple in-memory cache so repeated lookups for the same book don't waste API calls.
-    # Key = (norm_isbn, norm_title, norm_author), Value = (rating, count, genres, cover_url)
+    # Per-entry TTL cache (6 hours) so repeated lookups don't waste API calls.
+    # Key = (norm_isbn, norm_title, norm_author)
+    # Value = (result_tuple, insert_timestamp)
     _hc_cache: dict = {}
+    _HC_CACHE_TTL: int = 6 * 3600  # 6 hours
 
     @staticmethod
     def _get_hardcover_cached(isbn: str, title: str, author: str) -> tuple:
-        """Cached wrapper around _get_hardcover_data.
-
-        Cache is keyed by (isbn, title, author) so the same book looked up
-        multiple times (e.g. same ISBN in GB + iTunes results) hits cache.
-        """
+        """Cached wrapper around _get_hardcover_data with per-entry TTL."""
+        import time as _time
+        now = _time.time()
         norm = (
             isbn.replace("-", "").strip().lower() if isbn else "",
             title.strip().lower() if title else "",
             author.strip().lower() if author else "",
         )
-        if norm in MultiSourceBookAggregator._hc_cache:
-            logger.debug(f"🔁 Hardcover cache hit: {title or isbn}")
-            return MultiSourceBookAggregator._hc_cache[norm]
+        cached = MultiSourceBookAggregator._hc_cache.get(norm)
+        if cached is not None:
+            result, ts = cached
+            if now - ts < MultiSourceBookAggregator._HC_CACHE_TTL:
+                logger.debug(f"🔁 Hardcover cache hit: {title or isbn}")
+                return result
+            # Expired — remove so we re-fetch below
+            MultiSourceBookAggregator._hc_cache.pop(norm, None)
 
         result = MultiSourceBookAggregator._get_hardcover_data(isbn, title, author)
 
-        # Cap cache size to bound memory usage (drop oldest entries)
+        # Cap cache size to bound memory usage (drop oldest entries by timestamp)
         if len(MultiSourceBookAggregator._hc_cache) >= 512:
-            for old_key in list(MultiSourceBookAggregator._hc_cache.keys())[:64]:
+            sorted_keys = sorted(
+                MultiSourceBookAggregator._hc_cache,
+                key=lambda k: MultiSourceBookAggregator._hc_cache[k][1],
+            )
+            for old_key in sorted_keys[:64]:
                 MultiSourceBookAggregator._hc_cache.pop(old_key, None)
 
-        MultiSourceBookAggregator._hc_cache[norm] = result
+        MultiSourceBookAggregator._hc_cache[norm] = (result, now)
         return result
 
     @staticmethod
     def _flush_hc_cache():
-        """Clear the Hardcover cache (call at start of new day or manually)."""
+        """Clear the Hardcover cache (called by Vercel cron for housekeeping)."""
         MultiSourceBookAggregator._hc_cache.clear()
 
     # ── Hardcover cover fallback ─────────────────────────────────────────────

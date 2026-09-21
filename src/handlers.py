@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import tempfile
+import time
 import requests
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,10 +33,37 @@ class GoodreadsBot:
             .get_updates_read_timeout(40.0)
             .build()
         )
+        # search_cache: {user_id: (books_list, timestamp)}
+        # Entries expire after _SEARCH_CACHE_TTL seconds.
         self.search_cache: dict = {}
+        self._SEARCH_CACHE_TTL: int = 60 * 60  # 60 minutes
+        self._SEARCH_CACHE_MAX: int = 1000      # max users tracked
         self.aggregator = MultiSourceBookAggregator()
         self.webhook_mode = webhook_mode
         self.setup_handlers()
+
+    def _get_cached_books(self, user_id: int) -> list | None:
+        """Return cached search results for *user_id*, or None if missing/expired."""
+        entry = self.search_cache.get(user_id)
+        if entry is None:
+            return None
+        books, ts = entry
+        if time.time() - ts > self._SEARCH_CACHE_TTL:
+            self.search_cache.pop(user_id, None)
+            return None
+        return books
+
+    def _set_cached_books(self, user_id: int, books: list) -> None:
+        """Store search results for *user_id* with a timestamp."""
+        # Bound cache size — drop oldest entries when full
+        if len(self.search_cache) >= self._SEARCH_CACHE_MAX:
+            # Evict the 10% oldest by timestamp
+            sorted_users = sorted(
+                self.search_cache, key=lambda k: self.search_cache[k][1]
+            )
+            for uid in sorted_users[: max(1, len(sorted_users) // 10)]:
+                self.search_cache.pop(uid, None)
+        self.search_cache[user_id] = (books, time.time())
 
     # ── Handler registration ──────────────────────────────────────────────────
 
@@ -287,7 +315,7 @@ Use /help for more information.
             await update.message.chat.send_action("typing")
             logger.info(f"👤 User search: {query_text}")
 
-            books = self.aggregator.aggregate_book_data(query_text, limit=10)
+            books = await self.aggregator.aggregate_book_data(query_text, limit=10)
 
             if not books:
                 logger.warning(f"No books found for: {query_text}")
@@ -299,7 +327,7 @@ Use /help for more information.
                 return
 
             user_id = update.effective_user.id
-            self.search_cache[user_id] = books
+            self._set_cached_books(user_id, books)
 
             keyboard = []
             for idx, book in enumerate(books[:10]):
@@ -337,11 +365,11 @@ Use /help for more information.
                 parts = callback_data.split("_")
                 user_id = int(parts[1])
 
-                if user_id not in self.search_cache:
+                books = self._get_cached_books(user_id)
+                if books is None:
                     await query.answer("Search results expired.", show_alert=True)
                     return
 
-                books = self.search_cache[user_id]
                 keyboard = []
                 for idx, book in enumerate(books[:10]):
                     button_text = f"{idx + 1}. {book['title'][:50]}..."
@@ -369,11 +397,11 @@ Use /help for more information.
                 user_id = int(parts[1])
                 book_idx = int(parts[2])
 
-                if user_id not in self.search_cache:
+                books = self._get_cached_books(user_id)
+                if books is None:
                     await query.answer("Search results expired.", show_alert=True)
                     return
 
-                books = self.search_cache[user_id]
                 if book_idx >= len(books):
                     await query.answer("Invalid selection.", show_alert=True)
                     return
@@ -385,7 +413,7 @@ Use /help for more information.
                     await query.answer("No cover image available.", show_alert=True)
                     return
 
-                temp_file = self.download_and_save_image(cover_url)
+                temp_file = await asyncio.to_thread(self.download_and_save_image, cover_url)
                 if not temp_file:
                     await query.answer("Failed to download cover.", show_alert=True)
                     return
@@ -411,22 +439,25 @@ Use /help for more information.
             user_id = int(parts[1])
             book_idx = int(parts[2])
 
-            if user_id not in self.search_cache:
+            books = self._get_cached_books(user_id)
+            if books is None:
                 await query.edit_message_text("❌ Search results expired.", parse_mode=ParseMode.HTML)
                 return
 
-            books = self.search_cache[user_id]
             if book_idx >= len(books):
                 await query.edit_message_text("❌ Invalid selection.", parse_mode=ParseMode.HTML)
                 return
 
             book = books[book_idx]
 
-            # Fetch ratings lazily (saves Hardcover API quota — not fetched during search)
-            book = MultiSourceBookAggregator._ensure_ratings(book)
+            # Fetch ratings lazily (saves Hardcover API quota — not fetched during search).
+            # _ensure_ratings also returns the cached Hardcover data so _ensure_cover
+            # can reuse it without a redundant API call.
+            book, hc_data = MultiSourceBookAggregator._ensure_ratings(book)
 
-            # Source a real cover if Google Books only offered its placeholder
-            book = MultiSourceBookAggregator._ensure_cover(book)
+            # Source a real cover if Google Books only offered its placeholder.
+            # Pass hc_data to avoid re-fetching from Hardcover.
+            book = MultiSourceBookAggregator._ensure_cover(book, hc_data=hc_data)
 
             text_info = self.format_book_message(book)
 
@@ -462,7 +493,7 @@ Use /help for more information.
             cover_url = book.get("cover_url")
 
             if cover_url:
-                temp_file = self.download_and_save_image(cover_url)
+                temp_file = await asyncio.to_thread(self.download_and_save_image, cover_url)
 
             if temp_file:
                 try:
