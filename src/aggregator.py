@@ -5,7 +5,7 @@ import os
 import json
 import requests
 
-from src.utils import HEADERS, logger, is_placeholder_image, is_unreliable_gb_cover
+from src.utils import HEADERS, logger, is_placeholder_image, is_unreliable_gb_cover, translate_to_english
 from src.search import scrape_goodreads
 
 # Google Books API key is optional; without it the API still works, just unauthenticated.
@@ -106,7 +106,7 @@ class MultiSourceBookAggregator:
                 "author": author,
                 "rating": rating,
                 "rating_count": rating_count,
-                "description": vol.get("description", ""),
+                "description": translate_to_english(vol.get("description", "")),
                 "isbn": isbn,
                 "cover_url": cover_url,
                 "page_count": vol.get("pageCount", 0),

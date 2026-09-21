@@ -77,3 +77,41 @@ def is_unreliable_gb_cover(volume_id: str) -> bool:
     """Google Books volume IDs ending in 'AACAAJ' are metadata‑only records
     with no cover art — their image URLs resolve to the placeholder."""
     return bool(volume_id) and volume_id.endswith("AACAAJ")
+
+
+# ── Auto-translation ──────────────────────────────────────────────────────────
+# Translates non-English text to English using Google Translate's free API.
+# Uses the same requests library already imported — no extra dependencies.
+# Handles 429 rate limits with a single retry after a short delay.
+
+import requests as _requests
+
+
+def translate_to_english(text: str) -> str:
+    """Translate *text* to English if it is non-English. Returns original on failure."""
+    if not text or not text.strip():
+        return text
+    for attempt in range(2):
+        try:
+            resp = _requests.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={"client": "gtx", "sl": "auto", "tl": "en", "dt": "t", "q": text},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=8,
+            )
+            if resp.status_code == 429:
+                if attempt == 0:
+                    import time
+                    time.sleep(1.5)
+                    continue
+                return text
+            if resp.status_code != 200:
+                return text
+            # Response is nested lists: [[["translated","original",...], ...], ...]
+            data = resp.json()
+            translated = "".join(part[0] for part in data[0] if part[0])
+            return translated if translated else text
+        except Exception as e:
+            logger.debug(f"Translation failed: {e}")
+            return text
+    return text
