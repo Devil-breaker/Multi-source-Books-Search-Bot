@@ -1047,19 +1047,6 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                                 book_data["rating_formatted"] = best.get("rating_formatted", f"{best['rating']:.2f}")
                                 book_data["rating_source"] = best.get("rating_source", "hardcover")
 
-                # DEBUG: Log metadata after enrichment to diagnose display issues
-                logger.info(
-                    "Inline metadata after enrichment: "
-                    "isbn=%s, pages=%s, published_date=%s, "
-                    "genres=%s, rating=%s, rating_count=%s",
-                    book_data.get("isbn"),
-                    book_data.get("page_count"),
-                    book_data.get("published_date"),
-                    book_data.get("categories") or book_data.get("genres"),
-                    book_data.get("rating"),
-                    book_data.get("rating_count"),
-                )
-
                 # Build expanded caption
                 expanded_caption = self._build_expanded_inline_caption(book_data)
 
@@ -1301,19 +1288,32 @@ Example: <code>@{context.bot.username} Harry Potter</code>
         author = html_escape(book.get("author", "Unknown"))
         isbn = html_escape(book.get("isbn", ""))
         pages = book.get("page_count", 0)
-        year = (book.get("published_date") or "")[:4]
+        published_date = book.get("published_date", "")
+        year = published_date[:4] if published_date else ""
         lang = book.get("language", "")
         publisher = html_escape(book.get("publisher", ""))
+        asin = book.get("asin", "")
 
+        # Start with required header
         parts = [
             f"📖 <b>Title:</b> {title}",
             f"✍️ <b>Author:</b> {author}",
+            "",  # blank line
         ]
 
-        # Genres
+        # Genres: limit to 5, remove duplicates
         categories = book.get("categories", [])
         if categories:
-            genres_str = ", ".join(categories)
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_categories = []
+            for cat in categories:
+                if cat not in seen:
+                    seen.add(cat)
+                    unique_categories.append(cat)
+            # Limit to 5
+            limited_categories = unique_categories[:5]
+            genres_str = ", ".join(limited_categories)
             parts.append(f"🏷️ <b>Genres:</b> {html_escape(genres_str)}")
 
         # Rating
@@ -1325,36 +1325,34 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                 rating_num = float(str(rating).replace(",", "."))
                 stars = "⭐" * min(int(rating_num), 5)
                 parts.append(
-                    f"📊 <b>Rating:</b> {stars} <b>{html_escape(str(rating))}</b>/5 "
+                    f"⭐ <b>Rating:</b> {stars} <b>{html_escape(str(rating))}</b>/5 "
                     f"(<b>{rating_cnt:,}</b> ratings"
                     f"{f', {rating_reviews:,} reviews' if rating_reviews else ''})"
                 )
             except ValueError:
                 parts.append(
-                    f"📊 <b>Rating:</b> {html_escape(str(rating))}/5 "
+                    f"⭐ <b>Rating:</b> {html_escape(str(rating))}/5 "
                     f"(<b>{rating_cnt:,}</b> ratings"
                     f"{f', {rating_reviews:,} reviews' if rating_reviews else ''})"
                 )
 
+        # Core metadata that should NOT be removed
+        if isbn:
+            parts.append(f"🆔 <b>ISBN:</b> <code>{isbn}</code>")
+        if pages:
+            parts.append(f"📄 <b>Pages:</b> {pages}")
         if year:
-            parts.append(f"📅 <b>Published:</b> {year}")
+            parts.append(f"📅 <b>Year:</b> {year}")
+
+        # Optional lower-priority fields
         if lang:
             parts.append(f"🌐 <b>Language:</b> {html_escape(lang)}")
         if publisher:
             parts.append(f"🏢 <b>Publisher:</b> {publisher}")
-        if pages:
-            parts.append(f"📚 <b>Format:</b> {pages} pages")
-        if isbn:
-            parts.append(f"🆔 <b>ISBN:</b> <code>{isbn}</code>")
 
-        # ASIN if available
-        asin = book.get("asin", "")
-        if asin:
-            parts[-1] = parts[-1].replace("</code>", f" | <b>ASIN:</b> {html_escape(asin)}</code>")
+        parts.append("")  # blank line before summary
 
-        parts.append("")  # blank line
-
-        # Description with expandable blockquote
+        # Description with expandable blockquote - will be truncated first if needed
         desc_text = (book.get("description") or "").strip()
         if desc_text:
             # Clean HTML tags
@@ -1362,80 +1360,35 @@ Example: <code>@{context.bot.username} Harry Potter</code>
             desc_text = re.sub(r"\s+", " ", desc_text).strip()
             # Escape for HTML
             desc_text = html_escape(desc_text)
-            # Truncate plain text to safe length BEFORE wrapping in HTML
-            max_desc_length = 800  # Conservative limit for description
-            if len(desc_text) > max_desc_length:
-                # Truncate at word boundary
-                truncated = desc_text[:max_desc_length]
-                last_space = truncated.rfind(" ")
-                if last_space > max_desc_length * 0.8:
-                    desc_text = truncated[:last_space] + "..."
-                else:
-                    desc_text = truncated + "..."
-            parts.append("")
             parts.append("📄 <b>Summary</b>")
             parts.append(f"<blockquote expandable>{desc_text}</blockquote>")
 
         parts.append("")
-        parts.append("🔵 <b>Source:</b> {source}".format(source=book.get("source", "unknown").replace('_', ' ').title()))
+        parts.append("🔵 <b>Source:</b> Hardcover")
 
         # Join and ensure length is safe
         caption = "\n".join(parts)
-        # Final safety check - if still too long, remove optional fields
+
+        # Final safety check - if still too long, truncate description FIRST
+        # (never remove core metadata: ISBN, Pages, Year)
         if len(caption) > 1020:
-            # Remove ASIN line if present
-            if asin:
-                for i, part in enumerate(parts):
-                    if "ASIN:" in part:
-                        parts.pop(i)
-                        break
-                caption = "\n".join(parts)
-            # If still too long, remove publisher
-            if len(caption) > 1020 and publisher:
-                for i, part in enumerate(parts):
-                    if "Publisher:" in part:
-                        parts.pop(i)
-                        break
-                caption = "\n".join(parts)
-            # If still too long, remove language
-            if len(caption) > 1020 and lang:
-                for i, part in enumerate(parts):
-                    if "Language:" in part:
-                        parts.pop(i)
-                        break
-                caption = "\n".join(parts)
-            # If still too long, remove published year
-            if len(caption) > 1020 and year:
-                for i, part in enumerate(parts):
-                    if "Published:" in part:
-                        parts.pop(i)
-                        break
-                caption = "\n".join(parts)
-            # If still too long, remove pages
-            if len(caption) > 1020 and pages:
-                for i, part in enumerate(parts):
-                    if "Format:" in part:
-                        parts.pop(i)
-                        break
-                caption = "\n".join(parts)
-            # Last resort: truncate description further
-            if len(caption) > 1020:
-                for i, part in enumerate(parts):
-                    if part == "📄 <b>Summary</b>":
-                        if i + 1 < len(parts) and parts[i + 1].startswith("<blockquote expandable>"):
-                            current_desc = parts[i + 1][23:-13]
-                            parts_without_desc = parts[:i+1] + [""] + parts[i+2:]
-                            base_length = len("\n".join(parts_without_desc))
-                            max_desc_len = 1020 - base_length - 3
-                            if max_desc_len > 10:
-                                if len(current_desc) > max_desc_len:
-                                    truncated = current_desc[:max_desc_len]
-                                    last_space = truncated.rfind(" ")
-                                    if last_space > max_desc_len * 0.8:
-                                        truncated = truncated[:last_space]
-                                    parts[i + 1] = f"<blockquote expandable>{truncated}...</blockquote>"
-                            break
-                caption = "\n".join(parts)
+            # Find description parts
+            for i, part in enumerate(parts):
+                if part == "📄 <b>Summary</b>":
+                    if i + 1 < len(parts) and parts[i + 1].startswith("<blockquote expandable>"):
+                        current_desc = parts[i + 1][23:-13]
+                        parts_without_desc = parts[:i+1] + [""] + parts[i+2:]
+                        base_length = len("\n".join(parts_without_desc))
+                        max_desc_len = 1020 - base_length - 3
+                        if max_desc_len > 10:
+                            if len(current_desc) > max_desc_len:
+                                truncated = current_desc[:max_desc_len]
+                                last_space = truncated.rfind(" ")
+                                if last_space > max_desc_len * 0.8:
+                                    truncated = truncated[:last_space]
+                                parts[i + 1] = f"<blockquote expandable>{truncated}...</blockquote>"
+                    break
+            caption = "\n".join(parts)
 
         return caption
 

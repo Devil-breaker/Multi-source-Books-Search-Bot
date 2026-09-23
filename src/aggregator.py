@@ -248,7 +248,7 @@ class MultiSourceBookAggregator:
                 rating_count = doc.get("ratings_count", 0)
 
                 # Get page count
-                page_count = doc.get("pageCount", 0) or doc.get("page_count", 0)
+                page_count = doc.get("pages", 0)
 
                 # Get description
                 description = doc.get("description", "")
@@ -256,11 +256,11 @@ class MultiSourceBookAggregator:
                 # Get categories/genres
                 genres = doc.get("genres", [])
 
-                # Get published date (might be release_date or publishedDate)
-                published_date = doc.get("releaseDate", "") or doc.get("publishedDate", "")
+                # Get published date (Hardcover uses release_date)
+                published_date = doc.get("release_date", "") or doc.get("releaseDate", "") or doc.get("publishedDate", "")
 
                 # Get ISBN
-                isbn = doc.get("isbn", "") or doc.get("isbn13", "") or doc.get("isbn10", "")
+                isbn = doc.get("isbns", [])[0] if doc.get("isbns") else ""
 
                 # Get cover URL
                 image_data = doc.get("image", {}) or {}

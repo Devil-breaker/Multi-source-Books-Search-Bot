@@ -37,6 +37,14 @@ src/
 - 💬 **Inline search** – use `@BotUsername <book name>` from any chat
 - 📱 **Telegram-native** – works in private chats, groups & channels
 
+## 💬 Inline Search
+
+No commands needed — search from any Telegram chat:
+
+1. Type `@BotUsername <book name>` in any chat's message box
+2. Pick a result from the list
+3. Tap ⏳ on a result to expand full details (ISBN, pages, year, genres & more)
+
 ## 🚀 Deployment
 
 ### Option 1 — Polling (local / VPS / Docker)
