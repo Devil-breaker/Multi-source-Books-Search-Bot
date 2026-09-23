@@ -333,7 +333,7 @@ Use /help for more information.
             asyncio.to_thread(MSA.search_hardcover, query, 10)
         )
         itunes_task = asyncio.create_task(
-            asyncio.to_thread(MSA.search_itunes, query, 8)
+            asyncio.to_thread(MSA.search_itunes, query)
         )
 
         done, _pending = await asyncio.wait(
