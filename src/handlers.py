@@ -986,25 +986,73 @@ Use /help for more information.
                         5,
                     )
                     if hc_books:
-                        # Pick best match by title+author similarity
+                        # Pick best match by title+author similarity, preferring metadata-rich results
                         title_lower = (book_data.get("title") or "").lower()
                         author_lower = (book_data.get("author") or "").lower()
-                        best, best_score = None, 0
+
+                        def _metadata_richness(book: dict) -> int:
+                            """Score how much useful metadata a Hardcover result has."""
+                            score = 0
+                            if book.get("isbn"): score += 2
+                            if book.get("page_count"): score += 2
+                            if book.get("published_date"): score += 2
+                            if book.get("categories") or book.get("genres"): score += 2
+                            if book.get("description"): score += 1
+                            if book.get("cover_url"): score += 1
+                            if book.get("rating") and book.get("rating") > 0: score += 1
+                            if book.get("rating_count") and book.get("rating_count") > 0: score += 1
+                            return score
+
+                        best, best_score, best_richness = None, -1, -1
                         for hb in hc_books:
                             hb_title = (hb.get("title") or "").lower()
                             hb_author = (hb.get("author") or "").lower()
-                            score = (title_lower in hb_title or hb_title in title_lower) + \
-                                    (author_lower in hb_author or hb_author in author_lower)
-                            if score > best_score:
-                                best_score = score
+                            # Primary: title match (2) + author match (2) = max 4
+                            title_match = 2 if (title_lower in hb_title or hb_title in title_lower) else 0
+                            author_match = 2 if (author_lower in hb_author or hb_author in author_lower) else 0
+                            primary_score = title_match + author_match
+                            # Secondary: metadata richness (max 12)
+                            richness = _metadata_richness(hb)
+                            # Combined: primary dominates, richness breaks ties
+                            combined = (primary_score << 8) + richness
+                            if combined > best_score:
+                                best_score = combined
+                                best_richness = richness
                                 best = hb
-                        if best and best_score >= 1:
+                        if best and best_score >= 256:  # At least one of title/author matched
                             if not book_data.get("isbn") and best.get("isbn"):
                                 book_data["isbn"] = best["isbn"]
                             if not book_data.get("page_count") and best.get("page_count"):
                                 book_data["page_count"] = best["page_count"]
                             if not book_data.get("published_date") and best.get("published_date"):
                                 book_data["published_date"] = best["published_date"]
+                            # Also merge genres/categories, description, cover, and rating
+                            # if the selected book is missing them
+                            if not book_data.get("categories") and best.get("categories"):
+                                book_data["categories"] = best["categories"]
+                                book_data["genres"] = best.get("genres", best["categories"])
+                            if not book_data.get("description") and best.get("description"):
+                                book_data["description"] = best["description"]
+                            if not book_data.get("cover_url") and best.get("cover_url"):
+                                book_data["cover_url"] = best["cover_url"]
+                            if not book_data.get("rating") and best.get("rating"):
+                                book_data["rating"] = best["rating"]
+                                book_data["rating_count"] = best.get("rating_count", 0)
+                                book_data["rating_formatted"] = best.get("rating_formatted", f"{best['rating']:.2f}")
+                                book_data["rating_source"] = best.get("rating_source", "hardcover")
+
+                # DEBUG: Log metadata after enrichment to diagnose display issues
+                logger.info(
+                    "Inline metadata after enrichment: "
+                    "isbn=%s, pages=%s, published_date=%s, "
+                    "genres=%s, rating=%s, rating_count=%s",
+                    book_data.get("isbn"),
+                    book_data.get("page_count"),
+                    book_data.get("published_date"),
+                    book_data.get("categories") or book_data.get("genres"),
+                    book_data.get("rating"),
+                    book_data.get("rating_count"),
+                )
 
                 # Build expanded caption
                 expanded_caption = self._build_expanded_inline_caption(book_data)
