@@ -29,6 +29,14 @@ src/
 | `/help` | Show help and usage guide |
 | `/search <query>` | Search for books by title, author, or ISBN |
 
+## 🔍 Features
+
+- 🔎 **Multi-source search** – Google Books, Hardcover.app, iTunes & more
+- 📖 **Rich book data** – titles, authors, descriptions, ratings, covers
+- 🖼️ **High-resolution images** – iTunes-quality covers
+- 💬 **Inline search** – use `@BotUsername <book name>` from any chat
+- 📱 **Telegram-native** – works in private chats, groups & channels
+
 ## 🚀 Deployment
 
 ### Option 1 — Polling (local / VPS / Docker)

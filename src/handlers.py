@@ -155,8 +155,7 @@ class GoodreadsBot:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message on /start."""
-        await update.message.reply_text(
-            """
+        await update.message.reply_text( f"""
 🤖 <b>Multi-Source Book Bot</b>
 
 Welcome! I search across multiple sources to find the best book information,
@@ -164,9 +163,11 @@ covers, and descriptions.
 
 <b>How to use:</b>
 • <code>/search &lt;book_title&gt;</code> - Search for books
+• <code>@{context.bot.username} &lt;book_name&gt;</code> - Inline search from any chat
 
 <b>Example:</b>
 <code>/search Harry Potter and the Prisoner of Azkaban</code>
+<code>@{context.bot.username} Harry Potter</code>
 
 <b>Data Sources:</b>
 📚 Google Books - Descriptions & metadata
@@ -175,14 +176,13 @@ covers, and descriptions.
 📖 StoryGraph - Social reading ratings
 
 Use /help for more information.
-            """.strip(),
+            """ .strip(),
             parse_mode=ParseMode.HTML,
         )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send help text on /help."""
-        await update.message.reply_text(
-            """
+        await update.message.reply_text( f"""
 <b>📚 Multi-Source Book Bot Help</b>
 
 <b>Commands:</b>
@@ -200,11 +200,17 @@ Use /help for more information.
 ✓ Social ratings from StoryGraph
 ✓ Download covers as image files
 
+<b>Inline Search:</b>
+Use the bot from any Telegram chat by typing:
+<code>@{context.bot.username} &lt;book_name&gt;</code>
+
+Example: <code>@{context.bot.username} Harry Potter</code>
+
 <b>Tips:</b>
 • Use full book titles for best results
 • Include author name for better matching
 • Try different keywords if no results
-            """.strip(),
+            """ .strip(),
             parse_mode=ParseMode.HTML,
         )
 
