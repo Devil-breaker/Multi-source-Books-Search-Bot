@@ -36,6 +36,7 @@ class MultiSourceBookAggregator:
                 "printType": "books",
                 "orderBy": "relevance",
                 "langRestrict": "en",
+                "country": "IN",
             }
 
             if GOOGLE_BOOKS_API_KEY:
@@ -48,6 +49,20 @@ class MultiSourceBookAggregator:
 
             data = response.json()
             items = data.get("items", [])
+
+            # ── PART 2 diagnostic: log first 8 GB results ──────────────────────
+            if len(items) > 0:
+                sample = items[:8]
+                for idx, item in enumerate(sample):
+                    vol = item.get("volumeInfo", {})
+                    title = vol.get("title", "")
+                    authors = vol.get("authors", [])
+                    lang = vol.get("language", "")
+                    vid = item.get("id", "")
+                    logger.info(
+                        f"GB result [{idx}] id={vid} title={title[:50]} author={authors[0] if authors else '?'} lang={lang}"
+                    )
+            # ── end diagnostic ────────────────────────────────────────────────
 
             books = []
             for item in items:

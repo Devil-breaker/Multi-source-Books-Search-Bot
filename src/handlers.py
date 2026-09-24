@@ -8,6 +8,9 @@ import re
 import tempfile
 import time
 import requests
+from io import BytesIO
+from PIL import Image
+from urllib.parse import urlsplit
 
 from telegram import (
     Update,
@@ -712,21 +715,78 @@ Example: <code>@{context.bot.username} Harry Potter</code>
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
-    def download_and_save_image(self, cover_url: str):
-        """Download cover image and save to a temp file. Returns path or None."""
-        try:
-            logger.info(f"📥 Downloading cover: {cover_url[:60]}...")
-            response = requests.get(cover_url, headers=HEADERS, timeout=15)
-            response.raise_for_status()
+    def download_and_save_image(self, cover_url: str, book: dict = None):
+        """Download cover image and save to a temp file. Returns path or None.
 
-            if is_placeholder_image(response.content):
+        Args:
+            cover_url: URL to download.
+            book: Book dict (optional). Used for cover fallback and diagnostics.
+                  When the primary cover is a placeholder, retries with the
+                  Hardcover cover from book["_hardcover_match"]["cover_url"] if available.
+        """
+        cover_source = (book or {}).get("cover_source", "unknown")
+
+        def _log_cover_diagnostic(url, status, ctype, clen, final_url, width, height):
+            """Log diagnostic info for a cover download (PART 4)."""
+            domain = urlsplit(url).netloc
+            final_domain = urlsplit(final_url).netloc if final_url != url else domain
+            logger.info(
+                f"Cover diag: source={cover_source} url={url[:70]} "
+                f"status={status} type={ctype} len={clen} "
+                f"domain={final_domain} dims={width}x{height}"
+            )
+
+        def _download_one(url: str):
+            """Attempt one cover download. Returns (bytes, status, ctype, clen, final_url, width, height)."""
+            response = requests.get(url, headers=HEADERS, timeout=15, allow_redirects=True)
+            response.raise_for_status()
+            final_url = response.url
+            ctype = response.headers.get("Content-Type", "")
+            clen = len(response.content)
+            width = height = None
+            try:
+                img = Image.open(BytesIO(response.content))
+                width, height = img.size
+            except Exception:
+                pass
+            _log_cover_diagnostic(url, response.status_code, ctype, clen, final_url, width, height)
+            return response.content, response.status_code, ctype, clen, final_url, width, height
+
+        try:
+            logger.info(f"📥 Downloading cover: {cover_url[:60]}... source={cover_source}")
+            content, status, ctype, clen, final_url, width, height = _download_one(cover_url)
+
+            if is_placeholder_image(content):
                 logger.warning("⚠️ Cover resolved to a placeholder image; skipping cover.")
+                # ── PART 6 fallback: try Hardcover cover if available ─────────
+                if book and cover_source == "google_books":
+                    hc_cover = book.get("_hardcover_match", {}).get("cover_url")
+                    if hc_cover:
+                        logger.info(
+                            f"Fallback: retrying with Hardcover cover: {hc_cover[:60]}..."
+                        )
+                        try:
+                            content, status, ctype, clen, final_url, width, height = (
+                                _download_one(hc_cover)
+                            )
+                            if not is_placeholder_image(content):
+                                logger.info(f"✅ Fallback cover OK: {clen} bytes")
+                            else:
+                                logger.warning(
+                                    "⚠️ Fallback cover also placeholder; skipping."
+                                )
+                                return None
+                        except Exception as e:
+                            logger.warning(f"Fallback cover download failed: {e}")
+                            return None
+                    else:
+                        logger.info("No Hardcover cover available for fallback.")
                 return None
 
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-            temp_file.write(response.content)
+            temp_file.write(content)
             temp_file.close()
-            logger.info(f"✅ Downloaded: {len(response.content)} bytes")
+            logger.info(f"✅ Downloaded: {clen} bytes")
             return temp_file.name
         except Exception as e:
             logger.error(f"Error downloading image: {e}")
@@ -1085,7 +1145,7 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                     await query.answer("No cover image available.", show_alert=True)
                     return
 
-                temp_file = await asyncio.to_thread(self.download_and_save_image, cover_url)
+                temp_file = await asyncio.to_thread(self.download_and_save_image, cover_url, book)
                 if not temp_file:
                     await query.answer("Failed to download cover.", show_alert=True)
                     return
@@ -1310,7 +1370,7 @@ Example: <code>@{context.bot.username} Harry Potter</code>
             cover_url = book.get("cover_url")
 
             if cover_url:
-                temp_file = await asyncio.to_thread(self.download_and_save_image, cover_url)
+                temp_file = await asyncio.to_thread(self.download_and_save_image, cover_url, book)
 
             if temp_file:
                 try:
