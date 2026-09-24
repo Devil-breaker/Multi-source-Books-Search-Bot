@@ -753,40 +753,39 @@ Example: <code>@{context.bot.username} Harry Potter</code>
             return response.content, response.status_code, ctype, clen, final_url, width, height
 
         try:
-            logger.info(f"📥 Downloading cover: {cover_url[:60]}... source={cover_source}")
+            title = (book or {}).get("title", "")
+            logger.info(f"📥 Downloading cover: {cover_url[:60]}... source={cover_source} title={title}")
             content, status, ctype, clen, final_url, width, height = _download_one(cover_url)
 
             if is_placeholder_image(content):
-                logger.warning("⚠️ Cover resolved to a placeholder image; skipping cover.")
+                logger.warning(f"⚠️ Cover placeholder detected: source={cover_source} title={title}")
                 # ── PART 6 fallback: try Hardcover cover if available ─────────
                 if book and cover_source == "google_books":
                     hc_cover = book.get("_hardcover_match", {}).get("cover_url")
                     if hc_cover:
-                        logger.info(
-                            f"Fallback: retrying with Hardcover cover: {hc_cover[:60]}..."
-                        )
+                        logger.info(f"Cover fallback: source=hardcover title={title}")
                         try:
                             content, status, ctype, clen, final_url, width, height = (
                                 _download_one(hc_cover)
                             )
                             if not is_placeholder_image(content):
-                                logger.info(f"✅ Fallback cover OK: {clen} bytes")
+                                logger.info(f"✅ Cover fallback OK: source=hardcover title={title} bytes={clen}")
                             else:
                                 logger.warning(
-                                    "⚠️ Fallback cover also placeholder; skipping."
+                                    f"⚠️ Fallback cover also placeholder; skipping. title={title}"
                                 )
                                 return None
                         except Exception as e:
-                            logger.warning(f"Fallback cover download failed: {e}")
+                            logger.warning(f"Fallback cover download failed: {e} title={title}")
                             return None
                     else:
-                        logger.info("No Hardcover cover available for fallback.")
+                        logger.info(f"No Hardcover cover available for fallback. title={title}")
                 return None
 
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
             temp_file.write(content)
             temp_file.close()
-            logger.info(f"✅ Downloaded: {clen} bytes")
+            logger.info(f"✅ Downloaded: source={cover_source} title={title} bytes={clen}")
             return temp_file.name
         except Exception as e:
             logger.error(f"Error downloading image: {e}")

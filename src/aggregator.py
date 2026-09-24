@@ -36,7 +36,6 @@ class MultiSourceBookAggregator:
                 "printType": "books",
                 "orderBy": "relevance",
                 "langRestrict": "en",
-                "country": "IN",
             }
 
             if GOOGLE_BOOKS_API_KEY:
@@ -50,19 +49,34 @@ class MultiSourceBookAggregator:
             data = response.json()
             items = data.get("items", [])
 
-            # ── PART 2 diagnostic: log first 8 GB results ──────────────────────
-            if len(items) > 0:
-                sample = items[:8]
-                for idx, item in enumerate(sample):
-                    vol = item.get("volumeInfo", {})
-                    title = vol.get("title", "")
-                    authors = vol.get("authors", [])
-                    lang = vol.get("language", "")
-                    vid = item.get("id", "")
-                    logger.info(
-                        f"GB result [{idx}] id={vid} title={title[:50]} author={authors[0] if authors else '?'} lang={lang}"
-                    )
-            # ── end diagnostic ────────────────────────────────────────────────
+            # ── PART 1/2 diagnostic + language filter ─────────────────────────────
+            # langRestrict=en in the API params should filter by language metadata,
+            # but Koyeb Frankfurt IPs still return German results in practice.
+            # Belt-and-suspenders: apply an application-side filter as a safety net.
+            raw_count = len(items)
+            items = [
+                item
+                for item in items
+                if (item.get("volumeInfo") or {}).get("language") == "en"
+            ]
+            filtered_count = raw_count - len(items)
+            # Also reject items with blank/missing titles as a basic validity check.
+            items = [item for item in items if (item.get("volumeInfo") or {}).get("title", "").strip()]
+            invalid_count = raw_count - filtered_count - len(items)
+            logger.info(
+                f"GB: raw={raw_count} lang_filtered={filtered_count} "
+                f"invalid_title_filtered={invalid_count} final={len(items)}"
+            )
+            # ── end filter ─────────────────────────────────────────────────
+            for idx, item in enumerate(items[:8]):
+                vol = item.get("volumeInfo", {})
+                title = vol.get("title", "")
+                authors = vol.get("authors", [])
+                lang = vol.get("language", "")
+                vid = item.get("id", "")
+                logger.info(
+                    f"GB result [{idx}] id={vid} title={title[:50]} author={authors[0] if authors else '?'} lang={lang}"
+                )
 
             books = []
             for item in items:
@@ -769,7 +783,7 @@ class MultiSourceBookAggregator:
                      from _ensure_ratings to avoid a redundant API call.
         """
         if book.get("cover_url"):
-            return book  # already have a usable (non-placeholder) cover
+            return book  # already have a cover — keep it
 
         # 1) iTunes by title/author (highest quality artwork)
         try:
