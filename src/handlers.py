@@ -21,7 +21,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Inli
 from telegram.constants import ParseMode
 from telegram.error import NetworkError, TimedOut
 
-from src.utils import logger, HEADERS, html_escape, is_placeholder_image, translate_to_english
+from src.utils import logger, HEADERS, html_escape, is_placeholder_image, is_english_description, translate_to_english
 from src.search import build_goodreads_url
 from src.aggregator import MultiSourceBookAggregator
 
@@ -46,6 +46,9 @@ class GoodreadsBot:
         # Entries expire after _SEARCH_CACHE_TTL seconds.
         self.search_cache: dict = {}
         self._SEARCH_CACHE_TTL: int = 60 * 60  # 60 minutes
+        # Per-user current page and query text for normal search pagination
+        self._search_page_cache: dict[int, int] = {}  # user_id -> page number
+        self._search_query_cache: dict[int, str] = {}  # user_id -> query text
         self._SEARCH_CACHE_MAX: int = 1000      # max users tracked
         self.aggregator = MultiSourceBookAggregator()
         self.webhook_mode = webhook_mode
@@ -64,11 +67,11 @@ class GoodreadsBot:
         entry = self.search_cache.get(user_id)
         if entry is None:
             return None
-        books, ts = entry
+        ts = entry[1]
         if time.time() - ts > self._SEARCH_CACHE_TTL:
             self.search_cache.pop(user_id, None)
             return None
-        return books
+        return entry[0]
 
     def _set_cached_books(self, user_id: int, books: list) -> None:
         """Store search results for *user_id* with a timestamp."""
@@ -80,7 +83,7 @@ class GoodreadsBot:
             )
             for uid in sorted_users[: max(1, len(sorted_users) // 10)]:
                 self.search_cache.pop(uid, None)
-        self.search_cache[user_id] = (books, time.time())
+        self.search_cache[user_id] = (books, time.time(), "")
 
     def _get_inline_callback_data(self, callback_key: str) -> dict | None:
         """Return cached book data for *callback_key*, or None if missing/expired."""
@@ -824,8 +827,118 @@ Example: <code>@{context.bot.username} Harry Potter</code>
 
         return "\n".join(parts)
 
-    # ── Search ────────────────────────────────────────────────────────────────
+    # ── Search helpers ─────────────────────────────────────────────────────────
+    async def _preload_hardcover_ratings_for_page(
+        self, books: list, page_num: int, page_size: int
+    ) -> None:
+        """Preload Hardcover ratings for visible books on one page (concurrent).
 
+        Uses asyncio.gather() with one asyncio.to_thread() task per visible
+        book so the 5 lookups run genuinely in parallel. Hardcover is the
+        SINGLE source of truth for list ratings. Uses the existing _hc_cache
+        (no new cache layer).
+        """
+        start_idx = (page_num - 1) * page_size
+        end_idx = min(page_num * page_size, len(books))
+        visible = books[start_idx:end_idx]
+
+        logger.info(f"Normal search Hardcover preload started: page={page_num}, books={len(visible)}")
+
+        tasks = [
+            asyncio.to_thread(
+                MultiSourceBookAggregator._get_hardcover_cached,
+                book.get("isbn") or "",
+                book.get("title") or "",
+                book.get("author") or "",
+            )
+            for book in visible
+        ]
+        results = await asyncio.gather(*tasks)
+
+        for book, (hc_rating, hc_count, hc_genres, hc_cover) in zip(visible, results):
+            title = book.get("title") or ""
+            author = book.get("author") or ""
+            isbn = book.get("isbn") or ""
+
+            if hc_rating > 0:
+                book["search_rating"] = hc_rating
+                book["search_rating_count"] = hc_count
+                book["search_rating_formatted"] = f"{hc_rating:.2f}"
+                book["_hardcover_match"] = {
+                    "title": title,
+                    "author": author,
+                    "isbn": isbn,
+                    "rating": hc_rating,
+                    "rating_count": hc_count,
+                    "categories": hc_genres,
+                    "cover_url": hc_cover,
+                }
+                logger.info(
+                    f"Normal search Hardcover rating: {title} -> {hc_rating:.2f} ({hc_count} ratings)"
+                )
+            else:
+                logger.info(f"Normal search Hardcover rating unavailable: {title}")
+
+        logger.info(f"Normal search Hardcover preload completed: page={page_num}")
+
+    def _build_search_results_message(
+        self, books: list, query_text: str, user_id: int, page_num: int, page_size: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """Build formatted search results message with full titles, authors, ratings, and pagination."""
+        total_pages = max(1, (len(books) + page_size - 1) // page_size)
+        start_idx = (page_num - 1) * page_size
+        end_idx = min(page_num * page_size, len(books))
+
+        parts = [
+            f"📚 <b>Search Results</b>",
+            f"🔎 <i>{html_escape(query_text)}</i>",
+            "",
+        ]
+
+        for i in range(start_idx, end_idx):
+            book = books[i]
+            parts.append(f"📖 <b>{i + 1}.</b> {html_escape(book['title'])}")
+            parts.append(f"   ✍️ {html_escape(book['author'])}")
+
+            # Show rating if available (list-only fields, no extra API calls)
+            if book.get("search_rating") is not None and book.get("search_rating", 0) > 0:
+                parts.append(
+                    f"   ⭐ {book.get('search_rating_formatted', 'N/A')} ({book['search_rating_count']:,} ratings)"
+                )
+            else:
+                parts.append("   ❓ No ratings yet")
+
+            parts.append("")  # blank line between entries
+
+        # Footer
+        if total_pages > 1:
+            parts.append(f"👇 <i>Select a book — Page {page_num} of {total_pages}</i>")
+        else:
+            parts.append("👇 <i>Select a book:</i>")
+
+        # Keyboard: compact numbered buttons in rows of 5 + pagination nav
+        keyboard = []
+        row = []
+        for i in range(start_idx, end_idx):
+            row.append(InlineKeyboardButton(str(i + 1), callback_data=f"book_{user_id}_{i}_{page_num}"))
+            if len(row) == 5:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        if total_pages > 1:
+            nav_row = []
+            if page_num > 1:
+                nav_row.append(InlineKeyboardButton("◀️", callback_data=f"page_{user_id}_{page_num - 1}"))
+            nav_row.append(InlineKeyboardButton(f"{page_num}/{total_pages}", callback_data="noop"))
+            if page_num < total_pages:
+                nav_row.append(InlineKeyboardButton("▶️", callback_data=f"page_{user_id}_{page_num + 1}"))
+            keyboard.append(nav_row)
+
+        return "\n".join(parts), InlineKeyboardMarkup(keyboard)
+
+    # ── Search ────────────────────────────────────────────────────────────────
     async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /search command."""
         try:
@@ -850,6 +963,9 @@ Example: <code>@{context.bot.username} Harry Potter</code>
             await update.message.chat.send_action("typing")
             logger.info(f"👤 User search: {query_text}")
 
+            # Get aggregator results first, then preload Hardcover ratings for visible books.
+            # Hardcover is the single source of truth for list ratings; each book on the
+            # current page is looked up individually via _get_hardcover_cached (cached, concurrent).
             books = await self.aggregator.aggregate_book_data(query_text, limit=10)
 
             if not books:
@@ -863,22 +979,19 @@ Example: <code>@{context.bot.username} Harry Potter</code>
 
             user_id = update.effective_user.id
             self._set_cached_books(user_id, books)
+            self._search_page_cache[user_id] = 1
+            self._search_query_cache[user_id] = query_text
 
-            keyboard = []
-            for idx, book in enumerate(books[:10]):
-                button_text = f"{idx + 1}. {book['title'][:50]}..."
-                keyboard.append(
-                    [InlineKeyboardButton(button_text, callback_data=f"book_{user_id}_{idx}")]
-                )
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            results_text = (
-                f"📚 <b>Found {len(books)} results</b>\n"
-                "<i>Data aggregated from multiple sources</i>\n\n"
-                "Select a book:"
+            # Preload Hardcover ratings for page 1 BEFORE building the UI.
+            # Hardcover must be available so ratings appear in the result list.
+            # _preload_hardcover_ratings_for_page is async; internally it runs concurrent
+            # Hardcover lookups via asyncio.gather() inside asyncio.to_thread().
+            await self._preload_hardcover_ratings_for_page(books, 1, 5)
+            logger.info("Normal search result list building AFTER Hardcover preload")
+            results_text, keyboard = self._build_search_results_message(
+                books, query_text, user_id, 1, 5
             )
-
-            await update.message.reply_text(results_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            await update.message.reply_text(results_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
         except Exception as e:
             logger.error(f"Error in search_command: {e}", exc_info=True)
@@ -895,6 +1008,34 @@ Example: <code>@{context.bot.username} Harry Potter</code>
             await query.answer()
             callback_data = query.data
 
+            # ── Pagination ───────────────────────────────────────────────────
+            if callback_data.startswith("page_"):
+                parts = callback_data.split("_")
+                user_id = int(parts[1])
+                page_num = int(parts[2])
+
+                books = self._get_cached_books(user_id)
+                if books is None:
+                    await query.answer("Search results expired.", show_alert=True)
+                    return
+
+                self._search_page_cache[user_id] = page_num
+                query_text = self._search_query_cache.get(user_id, "")
+
+                # Preload Hardcover ratings for this page BEFORE rebuilding the message.
+                # Hardcover must be available so ratings appear in the list.
+                # _preload_hardcover_ratings_for_page is async; internally it runs concurrent
+                # Hardcover lookups via asyncio.gather() inside asyncio.to_thread().
+                await self._preload_hardcover_ratings_for_page(books, page_num, 5)
+                logger.info(f"Building result list page {page_num} AFTER Hardcover preload")
+                results_text, keyboard = self._build_search_results_message(
+                    books, query_text, user_id, page_num, 5
+                )
+                await query.edit_message_text(
+                    text=results_text, reply_markup=keyboard, parse_mode=ParseMode.HTML
+                )
+                return
+
             # ── Back to results ────────────────────────────────────────────────
             if callback_data.startswith("back_"):
                 parts = callback_data.split("_")
@@ -905,15 +1046,11 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                     await query.answer("Search results expired.", show_alert=True)
                     return
 
-                keyboard = []
-                for idx, book in enumerate(books[:10]):
-                    button_text = f"{idx + 1}. {book['title'][:50]}..."
-                    keyboard.append(
-                        [InlineKeyboardButton(button_text, callback_data=f"book_{user_id}_{idx}")]
-                    )
-
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                results_text = f"📚 <b>Found {len(books)} results</b>\n\nSelect a book:"
+                page_num = self._search_page_cache.get(user_id, 1)
+                query_text = self._search_query_cache.get(user_id, "")
+                results_text, keyboard = self._build_search_results_message(
+                    books, query_text, user_id, page_num=page_num, page_size=5
+                )
 
                 # Delete the current message (could be a photo or text) and send
                 # a clean, fresh text-only message with the results list.
@@ -921,7 +1058,7 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=results_text,
-                    reply_markup=reply_markup,
+                    reply_markup=keyboard,
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1107,6 +1244,9 @@ Example: <code>@{context.bot.username} Harry Potter</code>
             parts = callback_data.split("_")
             user_id = int(parts[1])
             book_idx = int(parts[2])
+            # page_num is encoded in callback as 4th part (for Back to Results restoration)
+            page_num = int(parts[3]) if len(parts) > 3 else 1
+            self._search_page_cache[user_id] = page_num
 
             books = self._get_cached_books(user_id)
             if books is None:
@@ -1129,8 +1269,9 @@ Example: <code>@{context.bot.username} Harry Potter</code>
             # Pass hc_data to avoid re-fetching from Hardcover.
             book = await asyncio.to_thread(MultiSourceBookAggregator._ensure_cover, book, hc_data=hc_data)
 
-            # Translate description lazily when user selects a book (performance fix)
-            if book.get("description"):
+            # Translate description lazily when user selects a book (performance fix).
+            # Skip if description is already English to avoid unnecessary HTTP calls.
+            if book.get("description") and not is_english_description(book["description"]):
                 book["description"] = await asyncio.to_thread(
                     translate_to_english, book["description"]
                 )

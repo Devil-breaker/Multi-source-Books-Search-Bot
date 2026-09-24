@@ -362,6 +362,12 @@ class MultiSourceBookAggregator:
                     "source": "goodreads",
                     "rating_formatted": f"{gr_data.get('rating', 0):.2f}" if gr_data.get("rating") else "N/A",
                 }
+                # Goodreads fallback bypasses the lazy reset, so copy rating to list-only fields too
+                book["search_rating"] = book.get("rating", 0.0)
+                book["search_rating_count"] = book.get("rating_count", 0)
+                book["search_rating_formatted"] = (
+                    f"{book['search_rating']:.2f}" if book["search_rating"] else "N/A"
+                )
                 logger.info(f"✅ Goodreads fallback found: {book['title']}")
                 return [book]
             logger.warning("No results from any source")
@@ -385,6 +391,14 @@ class MultiSourceBookAggregator:
             else:
                 book["cover_source"] = "google_books"
 
+            # Store Google Books rating in list-only fields before lazy reset (used for search result display)
+            # These fields are NOT overwritten by the rating=0.0 reset below.
+            book["search_rating"] = book.get("rating", 0.0)
+            book["search_rating_count"] = book.get("rating_count", 0)
+            book["search_rating_formatted"] = (
+                f"{book['search_rating']:.2f}" if book["search_rating"] else "N/A"
+            )
+
             # Hide rating in search results; will be fetched lazily on selection
             book["rating"] = 0.0
             book["rating_count"] = 0
@@ -397,6 +411,13 @@ class MultiSourceBookAggregator:
             for itunes_book in itunes_books[:limit]:
                 book = itunes_book.copy()
                 book["cover_source"] = "itunes"
+
+                # Store list-only rating fields (same as Google Books path above)
+                book["search_rating"] = book.get("rating", 0.0)
+                book["search_rating_count"] = book.get("rating_count", 0)
+                book["search_rating_formatted"] = (
+                    f"{book['search_rating']:.2f}" if book["search_rating"] else "N/A"
+                )
 
                 # Format rating
                 if book["rating"] > 0:
@@ -628,6 +649,10 @@ class MultiSourceBookAggregator:
     def _ensure_ratings(book: dict) -> tuple:
         """Ensure book has ratings by fetching from Hardcover/StoryGraph if missing.
 
+        When a normal `/search` result is selected, the book dict may already
+        contain `_hardcover_match` — a cached Hardcover result from the search.
+        If so, reuse that data directly without making another API call.
+
         Args:
             book: Dictionary with book data (must have 'title', 'author', optionally 'isbn')
 
@@ -636,14 +661,35 @@ class MultiSourceBookAggregator:
             cached Hardcover result (rating, count, genres, cover_url) so callers
             like _ensure_cover can reuse it without a redundant API call.
         """
-        # If already has a rating, still fetch hc_data for _ensure_cover reuse
+        # 1) Reuse cached Hardcover match from normal search if available
+        hc_match = book.get("_hardcover_match")
+        if hc_match:
+            hc_rating = hc_match.get("rating") or 0.0
+            hc_count = hc_match.get("rating_count") or 0
+            hc_genres = hc_match.get("categories", [])
+            hc_cover = hc_match.get("cover_url") or ""
+
+            if hc_rating > 0:
+                book["rating"] = hc_rating
+                book["rating_count"] = hc_count
+                book["rating_source"] = "hardcover"
+                book["rating_formatted"] = f"{hc_rating:.2f}"
+                if hc_genres:
+                    book["categories"] = hc_genres
+                if hc_cover and not book.get("cover_url"):
+                    book["cover_url"] = hc_cover
+                    book["cover_source"] = "hardcover"
+                logger.info(f"Reusing cached Hardcover data for: {book.get('title', '')}")
+                return book, (hc_rating, hc_count, hc_genres, hc_cover)
+
+        # 2) If already has a rating, still fetch hc_data for _ensure_cover reuse
         if book.get("rating") and book["rating"] > 0:
             hc_data = MultiSourceBookAggregator._get_hardcover_cached(
                 book.get("isbn", ""), book.get("title", ""), book.get("author", "")
             )
             return book, hc_data
 
-        # Try Hardcover first (cached to avoid repeat API calls)
+        # 3) Hardcover API lookup (cached to avoid repeat calls)
         hc_rating, hc_count, hc_genres, hc_cover = MultiSourceBookAggregator._get_hardcover_cached(
             book.get("isbn", ""), book.get("title", ""), book.get("author", "")
         )
