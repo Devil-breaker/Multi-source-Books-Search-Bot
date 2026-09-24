@@ -441,19 +441,19 @@ class MultiSourceBookAggregator:
                 book = itunes_book.copy()
                 book["cover_source"] = "itunes"
 
-                # Store list-only rating fields (same as Google Books path above)
-                book["search_rating"] = book.get("rating", 0.0)
-                book["search_rating_count"] = book.get("rating_count", 0)
-                book["search_rating_formatted"] = (
-                    f"{book['search_rating']:.2f}" if book["search_rating"] else "N/A"
-                )
+                # iTunes does not provide ratings; safe default prevents KeyError when GB
+            # fails/returns no English results and iTunes fallback is used.
+            book["rating"] = 0.0
+            book["rating_count"] = 0
 
-                # Format rating
-                if book["rating"] > 0:
-                    book["rating_formatted"] = f"{book['rating']:.2f}"
-                else:
-                    book["rating_formatted"] = "N/A"
-                aggregated_books.append(book)
+            # Store list-only rating fields (same as Google Books path above)
+            book["search_rating"] = 0.0
+            book["search_rating_count"] = 0
+            book["search_rating_formatted"] = "N/A"
+
+            # Format rating
+            book["rating_formatted"] = "N/A"
+            aggregated_books.append(book)
 
         logger.info(f"✅ Aggregated {len(aggregated_books)} books with enhanced data")
         return aggregated_books
