@@ -1372,6 +1372,40 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                 temp_file = await asyncio.to_thread(self.download_and_save_image, cover_url, book)
 
             if temp_file:
+                # ── TEMP FILE DIAGNOSTICS ──
+                import os as _os
+                _fpath = temp_file
+                _fsize = _os.path.getsize(_fpath) if _os.path.exists(_fpath) else -1
+                _fhex = ""
+                _freadable = False
+                _fpos_after_open = -1
+                _pil_fmt = ""
+                _pil_dims = ""
+                try:
+                    with open(_fpath, "rb") as _tf:
+                        _fhex = _tf.read(16).hex()
+                        _tf.seek(0)
+                        _freadable = len(_tf.read(1)) == 1
+                        _tf.seek(0)
+                        _fpos_after_open = _tf.tell()
+                        # PIL format/dims if already available (Pillow is in requirements.txt)
+                        try:
+                            from PIL import Image as _PILImg
+                            with open(_fpath, "rb") as _pf:
+                                _pil_img = _PILImg.open(_pf)
+                                _pil_fmt = _pil_img.format or "UNKNOWN"
+                                _pil_dims = f"{_pil_img.width}x{_pil_img.height}"
+                        except Exception:
+                            pass
+                except Exception as _e:
+                    _fhex = f"<read error: {_e}>"
+                logger.info(
+                    f"COVER DIAG: path={_fpath} size={_fsize} first16={_fhex} "
+                    f"readable={_freadable} fpos={_fpos_after_open} "
+                    f"pil_fmt={_pil_fmt} pil_dims={_pil_dims}"
+                )
+                # ── END DIAGNOSTICS ──
+
                 try:
                     keyboard = [
                         [
@@ -1389,6 +1423,7 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
 
+                    logger.info(f"ABOUT TO SEND COVER: path={_fpath} size={_fsize} position={_fpos_after_open}")
                     with open(temp_file, "rb") as f:
                         await context.bot.send_photo(
                             chat_id=query.message.chat_id,
@@ -1397,6 +1432,7 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                             parse_mode=ParseMode.HTML,
                             reply_markup=reply_markup,
                         )
+                    logger.info("COVER SEND COMPLETED")
                     logger.info(f"✅ Sent book: {book['title']}")
                 except Exception as e:
                     logger.warning(f"Could not send photo: {e}")
