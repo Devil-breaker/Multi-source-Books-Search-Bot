@@ -768,13 +768,13 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                             content, status, ctype, clen, final_url, width, height = (
                                 _download_one(hc_cover)
                             )
-                            if not is_placeholder_image(content):
-                                logger.info(f"✅ Cover fallback OK: source=hardcover title={title} bytes={clen}")
-                            else:
+                            if is_placeholder_image(content):
                                 logger.warning(
                                     f"⚠️ Fallback cover also placeholder; skipping. title={title}"
                                 )
                                 return None
+                            logger.info(f"✅ Cover fallback OK: source=hardcover title={title} bytes={clen}")
+                            # Fall through — content now holds the valid fallback bytes.
                         except Exception as e:
                             logger.warning(f"Fallback cover download failed: {e} title={title}")
                             return None
@@ -782,6 +782,7 @@ Example: <code>@{context.bot.username} Harry Potter</code>
                         logger.info(f"No Hardcover cover available for fallback. title={title}")
                 return None
 
+            # ── Write temp file (reached by both primary and fallback paths) ──────
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
             temp_file.write(content)
             temp_file.close()
