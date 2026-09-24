@@ -1,2 +1,0 @@
- * Serving Flask app 'goodreads_bot'
- * Debug mode: off
