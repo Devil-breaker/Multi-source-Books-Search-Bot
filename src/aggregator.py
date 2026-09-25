@@ -372,6 +372,23 @@ class MultiSourceBookAggregator:
             google_task, itunes_task
         )
 
+        # ── If the first Google Books result has no reliable cover, look for a later
+        #     result with the same title/author that does have a usable cover.
+        if google_books:
+            first = google_books[0]
+            # A missing or empty cover_url means the volume is unreliable (AACAAJ) or
+            # the placeholder image was stripped during parsing.
+            if not first.get("cover_url"):
+                for later in google_books[1:]:
+                    # Compare title and author (already normalized in the parsed dict)
+                    if (later["title"] == first["title"] and
+                        later["author"] == first["author"] and
+                        later.get("cover_url")):          # reliable cover exists
+                        # Substitute the first entry with the later one – order of the list
+                        # stays the same, only the first element's data changes.
+                        first.update(later)
+                        break
+
         # If no results from any source – try Goodreads scraping as a last resort
         if not google_books and not itunes_books:
             logger.warning("No results from any source – trying Goodreads fallback")
